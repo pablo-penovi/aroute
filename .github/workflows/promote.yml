@@ -1,7 +1,8 @@
 name: Promote tag to release
 
 # Run by hand from the Actions tab with a release candidate tag
-# (vx.y.z-rcN). It must be the latest release candidate of its version.
+# (vx.y.z-rcN). It must be the latest release candidate of its version, and
+# the version must be newer than the latest release.
 # Builds the Linux binaries at that tag and publishes release vx.y.z at the
 # same commit (creating the vx.y.z tag), with the notes taken from the
 # [x.y.z] section of CHANGELOG.md on main (so notes can still be fixed after
@@ -70,6 +71,12 @@ jobs:
           fi
           if gh release view "v$version" >/dev/null 2>&1; then
             echo "::error::v$version is already released."
+            exit 1
+          fi
+          latest_release=$(gh release list --limit 1000 --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName')
+          if [ -n "$latest_release" ] && \
+             [ "$(printf '%s\n' "$version" "${latest_release#v}" | sort -V | head -n 1)" = "$version" ]; then
+            echo "::error::$version is older than the latest release $latest_release; only newer versions can be released."
             exit 1
           fi
           if existing=$(git rev-list -n 1 "refs/tags/v$version" 2>/dev/null) && [ "$existing" != "$sha" ]; then
