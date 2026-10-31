@@ -1,22 +1,71 @@
 name: Release
 
+# Runs when a release is published, or edited later (e.g. marked as latest).
+# If it is the latest release and has no binaries yet, builds them, attaches
+# them, and sets the release notes to the version's CHANGELOG.md section.
+
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types:
+      - released
+      - edited
 
 permissions:
   contents: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.event.release.tag_name }}
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
 
 jobs:
+  check:
+    name: Check release
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Check it is the latest release without binaries
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
+          if [ "$latest" != "$TAG" ]; then
+            echo "::notice::$TAG is not the latest release ($latest is); nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          assets=$(gh release view "$TAG" --json assets --jq '[.assets[].name | select(startswith("aroute-"))] | length')
+          if [ "$assets" -gt 0 ]; then
+            echo "::notice::$TAG already has its binaries; nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(.github/scripts/zon-version.sh)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match build.zig.zon version $version."
+            exit 1
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.target }})
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         target:
           - x86_64-linux
@@ -24,6 +73,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Install Zig 0.17.0
         run: |
@@ -53,16 +104,28 @@ jobs:
 
   publish:
     name: Publish release
-    runs-on: ubuntu-latest
     needs: build
+    runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
       - name: Download executables
         uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
 
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/*
+      - name: Attach binaries and write notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/* --clobber
+          if .github/scripts/changelog-notes.sh "${TAG#v}" > notes.md; then
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            echo "::warning::CHANGELOG.md has no [${TAG#v}] section; release notes left as they were."
+          fi

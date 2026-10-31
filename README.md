@@ -54,7 +54,13 @@ zig build coverage
 
 Coverage output is written to `coverage/`; open `coverage/merged/kcov-merged/index.html` for the merged report. On every push to `main`, the `Coverage Pages` workflow publishes that report to [GitHub Pages](https://pablo-penovi.github.io/aroute/coverage/) along with the README badge.
 
-Pushing a `v*` tag builds static binaries for `x86_64-linux` and `aarch64-linux` and attaches them to a GitHub release.
+## Releasing
+
+1. In a PR, set the new version in `build.zig.zon` (`.version = "x.y.z"`) and move the `[Unreleased]` entries in `CHANGELOG.md` under a `## [x.y.z] - YYYY-MM-DD` heading.
+2. Merge the PR. Because the version is a plain `x.y.z` (no `-rc…` or other suffix), a draft release `vx.y.z` is created at the merge commit, with that CHANGELOG section as its notes. Later merges at the same version move the draft to the newest merge commit and refresh its notes.
+3. Review the draft and publish it as the latest release. That builds static binaries for `x86_64-linux` and `aarch64-linux`, attaches them, and sets the release notes to the CHANGELOG section.
+
+Pre-release versions such as `0.2.0-rc1` and the `0.0.0` placeholder never create a draft.
 
 Changes to `main` go through pull requests, which need approval from the code owner.
 
