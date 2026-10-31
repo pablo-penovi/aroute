@@ -3,6 +3,7 @@ name: Promote tag to release
 # Run by hand from the Actions tab with a release candidate tag
 # (vx.y.z-rcN). It must be the latest release candidate of its version, and
 # the version must be newer than the latest release.
+# Only the repository owner can run it.
 # Builds the Linux binaries at that tag and publishes release vx.y.z at the
 # same commit (creating the vx.y.z tag), with the notes taken from the
 # [x.y.z] section of CHANGELOG.md on main (so notes can still be fixed after
@@ -36,6 +37,18 @@ jobs:
       sha: ${{ steps.check.outputs.sha }}
       version: ${{ steps.check.outputs.version }}
     steps:
+      - name: Check who is promoting
+        env:
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTOR" != "$OWNER" ] || [ "$TRIGGERING_ACTOR" != "$OWNER" ]; then
+            echo "::error::Only $OWNER can promote tags to releases (run by $TRIGGERING_ACTOR)."
+            exit 1
+          fi
+
       - name: Checkout main
         uses: actions/checkout@v6
         with:
