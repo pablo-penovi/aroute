@@ -1,0 +1,49 @@
+# aroute
+
+A two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI, written in Zig.
+
+Sources go on the left (FROM), Destinations on the right (TO). Connect, disconnect, and save the whole set of connections as a profile you can load later. Audio is routed with `pw-link`; MIDI between two ALSA sequencer ports uses `aconnect`, and MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes through PipeWire's Midi-Bridge.
+
+> **Status:** design done, implementation not started. This is a rewrite of a bash script of the same name; see [docs/design.md](docs/design.md) for what is planned.
+
+## Usage
+
+```
+aroute                  interactive TUI
+aroute --list           print devices, connections and the current snapshot
+aroute --profiles       list saved profiles
+aroute --save NAME      save all current connections as a profile
+aroute --load NAME [--force]
+                        replace all current connections with a profile
+```
+
+In the TUI, items are picked with a letter. When a list doesn't fit, `PgUp`/`PgDn` page through it and `/` searches it.
+
+## Files
+
+- `${XDG_CONFIG_HOME:-~/.config}/aroute/profiles/<name>.conf`: one `FROM|TO` port pair per line. Ports are named `pw:<node.name>:<port.name>` or `alsa:<client name>:<port name>`, never by numeric ID.
+- `${XDG_CONFIG_HOME:-~/.config}/aroute/aliases`: display-name overrides, one `text=replacement` per line.
+
+Set `AROUTE_SHOW_ALL=1` to also list normally hidden ports (Midi Through, Sync ports).
+
+## Requirements
+
+- Zig 0.17 to build
+- PipeWire with `pw-dump` and `pw-link`
+- `aconnect` (alsa-utils)
+
+## Building
+
+```sh
+zig build -Doptimize=ReleaseSafe -p ~/.local
+```
+
+## Docs
+
+- [GLOSSARY.md](GLOSSARY.md): the terms used throughout (Device, Endpoint, Port, Link, Connection, …)
+- [docs/design.md](docs/design.md): design of the rewrite
+- [docs/adr/](docs/adr/): architecture decisions
+
+## License
+
+[MIT](LICENSE)

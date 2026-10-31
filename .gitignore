@@ -1,0 +1,3 @@
+/legacy/
+.zig-cache/
+zig-out/
