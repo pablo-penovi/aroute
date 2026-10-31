@@ -12,4 +12,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Glossary of domain terms and first architecture decision record.
 - Zig build skeleton with `test` and `coverage` (kcov) steps.
 - CI (tests, Linux cross-builds, format check) and coverage report on GitHub Pages.
-- Release flow: merging a PR tags the merge commit with the `build.zig.zon` version; the manually run "Promote tag to release" workflow publishes a tag as a release with `x86_64-linux` and `aarch64-linux` binaries and notes from this changelog.
+- Release flow: merging a PR tags the merge commit as the next release candidate of the `build.zig.zon` version (`vx.y.z-rcN`); the manually run "Promote tag to release" workflow publishes the latest release candidate as release `vx.y.z`, with `x86_64-linux` and `aarch64-linux` binaries and notes from this changelog.
