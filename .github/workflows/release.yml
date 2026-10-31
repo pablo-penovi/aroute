@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Zig 0.17.0
+        run: |
+          set -euo pipefail
+          curl -L "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz" -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.17.0" >> "$GITHUB_PATH"
+
+      - name: Verify Zig
+        run: zig version
+
+      - name: Build
+        run: zig build -Doptimize=safe -Dstrip=true -Dtarget=${{ matrix.target }}
+
+      - name: Stage executable
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp zig-out/bin/aroute "dist/aroute-${{ matrix.target }}"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: aroute-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download executables
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*

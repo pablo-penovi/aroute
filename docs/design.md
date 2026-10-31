@@ -45,5 +45,5 @@ Available only while picking (Connect, Disconnect, Load, Delete), never on the h
 A standard `zig build` project requiring Zig 0.17, with no third-party dependencies (terminal handling is hand-written). Install with:
 
 ```sh
-zig build -Doptimize=ReleaseSafe -p ~/.local
+zig build -Doptimize=safe -p ~/.local
 ```

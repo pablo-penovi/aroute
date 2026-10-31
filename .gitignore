@@ -1,3 +1,5 @@
 /legacy/
 .zig-cache/
 zig-out/
+coverage/
+dist/

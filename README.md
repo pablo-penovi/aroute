@@ -1,5 +1,8 @@
 # aroute
 
+[![CI](https://github.com/pablo-penovi/aroute/actions/workflows/ci.yml/badge.svg)](https://github.com/pablo-penovi/aroute/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fpablo-penovi.github.io%2Faroute%2Fcoverage-badge.json%3Fv%3D1&cacheSeconds=300)](https://pablo-penovi.github.io/aroute/coverage/)
+
 A two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI, written in Zig.
 
 Sources go on the left (FROM), Destinations on the right (TO). Connect, disconnect, and save the whole set of connections as a profile you can load later. Audio is routed with `pw-link`; MIDI between two ALSA sequencer ports uses `aconnect`, and MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes through PipeWire's Midi-Bridge.
@@ -31,12 +34,29 @@ Set `AROUTE_SHOW_ALL=1` to also list normally hidden ports (Midi Through, Sync p
 - Zig 0.17 to build
 - PipeWire with `pw-dump` and `pw-link`
 - `aconnect` (alsa-utils)
+- `kcov` for coverage reports (development only)
 
 ## Building
 
 ```sh
-zig build -Doptimize=ReleaseSafe -p ~/.local
+zig build -Doptimize=safe -p ~/.local
 ```
+
+## Development
+
+```sh
+# Run the tests
+zig build test --summary all
+
+# Run the tests through kcov and merge the coverage reports
+zig build coverage
+```
+
+Coverage output is written to `coverage/`; open `coverage/merged/kcov-merged/index.html` for the merged report. On every push to `main`, the `Coverage Pages` workflow publishes that report to [GitHub Pages](https://pablo-penovi.github.io/aroute/coverage/) along with the README badge.
+
+Pushing a `v*` tag builds static binaries for `x86_64-linux` and `aarch64-linux` and attaches them to a GitHub release.
+
+Changes to `main` go through pull requests, which need approval from the code owner.
 
 ## Docs
 

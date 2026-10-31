@@ -10,3 +10,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Design for the Zig rewrite of the `aroute` bash script: on-screen letter picking with paging, per-column search, and parity with the script's CLI and profile format.
 - Glossary of domain terms and first architecture decision record.
+- Zig build skeleton with `test` and `coverage` (kcov) steps.
+- CI (tests, Linux cross-builds, format check), coverage report on GitHub Pages, and release builds for `x86_64-linux` and `aarch64-linux` on `v*` tags.
