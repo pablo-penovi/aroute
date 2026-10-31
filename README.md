@@ -56,11 +56,11 @@ Coverage output is written to `coverage/`; open `coverage/merged/kcov-merged/ind
 
 ## Releasing
 
-1. In a PR, set the new version in `build.zig.zon` (`.version = "x.y.z"`, or e.g. `"x.y.z-rc1"`) and move the `[Unreleased]` entries in `CHANGELOG.md` under a `## [x.y.z] - YYYY-MM-DD` heading.
-2. Merge the PR. The merge commit is tagged `vx.y.z`; no release is created.
-3. To release a tag, run the **Promote tag to release** workflow from the Actions tab (or `gh workflow run promote.yml -f tag=vx.y.z`). It builds static binaries for `x86_64-linux` and `aarch64-linux` at that tag and publishes a release with them, taking the notes from the version's section of `CHANGELOG.md` on `main`.
+`build.zig.zon` always holds a plain `x.y.z` version; release candidates exist only as tags.
 
-   Promoting a release candidate publishes the final version: running it with `v0.1.0-rc1` publishes release `v0.1.0` at the same commit (creating the `v0.1.0` tag), with the notes from `## [0.1.0]` if `CHANGELOG.md` has it, else from `## [0.1.0-rc1]`. Other suffixes (`-beta1`) are published under their own tag as pre-releases.
+1. In a PR, set the version in `build.zig.zon` (`.version = "x.y.z"`) and put the changes in `CHANGELOG.md` under a `## [x.y.z] - YYYY-MM-DD` heading.
+2. Merge the PR. The merge commit is tagged as the next release candidate of that version: `vx.y.z-rc1`, then `vx.y.z-rc2` on the next merge at the same version, and so on. No release is created. Once `vx.y.z` is released, merges at that version are no longer tagged; bump the version.
+3. To release, run the **Promote tag to release** workflow from the Actions tab (or `gh workflow run promote.yml -f tag=vx.y.z-rcN`) with the **latest** release candidate of the version. It builds static binaries for `x86_64-linux` and `aarch64-linux` at that tag and publishes release `vx.y.z` at the same commit (creating the `vx.y.z` tag), with the notes from the `## [x.y.z]` section of `CHANGELOG.md` on `main`.
 
 The `0.0.0` placeholder is never tagged.
 

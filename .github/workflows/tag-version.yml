@@ -1,8 +1,9 @@
 name: Tag version
 
-# When a PR is merged into main, tag the merge commit with the version in
-# build.zig.zon (vx.y.z, or vx.y.z-rc1 and the like). No release is created;
-# run the "Promote tag to release" workflow for that.
+# When a PR is merged into main, tag the merge commit as the next release
+# candidate of the version in build.zig.zon: 0.0.9 → v0.0.9-rc1, the next
+# merge at 0.0.9 → v0.0.9-rc2, and so on. No release is created; run the
+# "Promote tag to release" workflow for that.
 
 on:
   pull_request:
@@ -31,31 +32,33 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
 
-      - name: Create tag
+      - name: Create release candidate tag
         env:
-          GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
           version=$(.github/scripts/zon-version.sh)
-          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::warning::Version $version in build.zig.zon is not x.y.z or x.y.z-suffix; no tag."
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::warning::Version $version in build.zig.zon is not a plain x.y.z version; no tag."
             exit 0
           fi
           if [ "$version" = "0.0.0" ]; then
             echo "::notice::Version is still the 0.0.0 placeholder; no tag."
             exit 0
           fi
-          tag="v$version"
-
-          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
-            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
-          if [ -z "$existing" ]; then
-            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$SHA" >/dev/null
-            echo "::notice::Tagged $SHA as $tag."
-          elif [ "$existing" = "$SHA" ]; then
-            echo "::notice::$tag already points at $SHA."
-          else
-            echo "::notice::$tag already exists (at $existing); bump the version in build.zig.zon to tag this merge."
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::notice::v$version is already released; bump the version in build.zig.zon for new release candidates."
+            exit 0
           fi
+          existing=$(git tag -l "v$version-rc*" --points-at "$SHA" | head -n 1)
+          if [ -n "$existing" ]; then
+            echo "::notice::$SHA is already tagged $existing."
+            exit 0
+          fi
+
+          tag="v$version-rc$(( $(.github/scripts/latest-rc.sh "$version") + 1 ))"
+          git tag "$tag" "$SHA"
+          git push origin "refs/tags/$tag"
+          echo "::notice::Tagged $SHA as $tag."

@@ -1,18 +1,17 @@
 name: Promote tag to release
 
-# Run by hand from the Actions tab: builds the Linux binaries at a version
-# tag and publishes a GitHub release for it, with the notes taken from
-# CHANGELOG.md on main (so notes can still be fixed after tagging).
-#
-# Promoting a release candidate (v0.1.0-rc1) publishes the final release
-# v0.1.0 at the same commit, creating the v0.1.0 tag. Other suffixes
-# (e.g. -beta1) are published under their own tag as pre-releases.
+# Run by hand from the Actions tab with a release candidate tag
+# (vx.y.z-rcN). It must be the latest release candidate of its version.
+# Builds the Linux binaries at that tag and publishes release vx.y.z at the
+# same commit (creating the vx.y.z tag), with the notes taken from the
+# [x.y.z] section of CHANGELOG.md on main (so notes can still be fixed after
+# tagging).
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to promote, e.g. v0.1.0
+        description: Release candidate tag to promote, e.g. v0.1.0-rc2
         required: true
         type: string
 
@@ -34,9 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.check.outputs.sha }}
-      release_tag: ${{ steps.check.outputs.release_tag }}
-      notes_version: ${{ steps.check.outputs.notes_version }}
-      prerelease: ${{ steps.check.outputs.prerelease }}
+      version: ${{ steps.check.outputs.version }}
     steps:
       - name: Checkout main
         uses: actions/checkout@v6
@@ -50,55 +47,44 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if ! [[ $TAG =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-rc([0-9]+)$ ]]; then
+            echo "::error::Only release candidate tags (vx.y.z-rcN) can be promoted, not $TAG."
+            exit 1
+          fi
+          version=${BASH_REMATCH[1]} rc=${BASH_REMATCH[2]}
           if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             echo "::error::There is no tag $TAG."
             exit 1
           fi
+          latest=$(.github/scripts/latest-rc.sh "$version")
+          if (( 10#$rc != latest )); then
+            echo "::error::v$version-rc$latest is the latest release candidate of $version; only it can be promoted."
+            exit 1
+          fi
           sha=$(git rev-list -n 1 "refs/tags/$TAG")
           git show "refs/tags/$TAG:build.zig.zon" > tag.zon
-          version=$(.github/scripts/zon-version.sh tag.zon)
-          if [ "v$version" != "$TAG" ]; then
-            echo "::error::Tag $TAG does not match its build.zig.zon version $version."
+          zon_version=$(.github/scripts/zon-version.sh tag.zon)
+          if [ "$zon_version" != "$version" ]; then
+            echo "::error::$TAG does not match its build.zig.zon version $zon_version."
+            exit 1
+          fi
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "::error::v$version is already released."
+            exit 1
+          fi
+          if existing=$(git rev-list -n 1 "refs/tags/v$version" 2>/dev/null) && [ "$existing" != "$sha" ]; then
+            echo "::error::Tag v$version already exists at $existing, not at $TAG ($sha)."
+            exit 1
+          fi
+          if ! .github/scripts/changelog-notes.sh "$version" > /dev/null 2>&1; then
+            echo "::error::CHANGELOG.md on main has no [$version] section; add one and run this again."
             exit 1
           fi
 
-          # A release candidate is promoted to the final version.
-          prerelease=false
-          if [[ $version =~ ^([0-9]+\.[0-9]+\.[0-9]+)-rc[0-9A-Za-z.-]*$ ]]; then
-            release_version=${BASH_REMATCH[1]}
-          else
-            release_version=$version
-            [[ $version == *-* ]] && prerelease=true
-          fi
-          release_tag="v$release_version"
-
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            echo "::error::$release_tag already has a release."
-            exit 1
-          fi
-          if existing=$(git rev-list -n 1 "refs/tags/$release_tag" 2>/dev/null) && [ "$existing" != "$sha" ]; then
-            echo "::error::Tag $release_tag already exists at $existing, not at $TAG ($sha)."
-            exit 1
-          fi
-
-          # Notes for the final version, else the release candidate's.
-          if .github/scripts/changelog-notes.sh "$release_version" > /dev/null 2>&1; then
-            notes_version=$release_version
-          elif .github/scripts/changelog-notes.sh "$version" > /dev/null 2>&1; then
-            notes_version=$version
-          else
-            sections="[$release_version]"
-            [ "$version" != "$release_version" ] && sections+=" or [$version]"
-            echo "::error::CHANGELOG.md on main has no $sections section; add one and run this again."
-            exit 1
-          fi
-
-          echo "::notice::Promoting $TAG ($sha) to release $release_tag with the CHANGELOG [$notes_version] notes."
+          echo "::notice::Promoting $TAG ($sha) to release v$version."
           {
             echo "sha=$sha"
-            echo "release_tag=$release_tag"
-            echo "notes_version=$notes_version"
-            echo "prerelease=$prerelease"
+            echo "version=$version"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -165,14 +151,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.check.outputs.sha }}
-          RELEASE_TAG: ${{ needs.check.outputs.release_tag }}
-          NOTES_VERSION: ${{ needs.check.outputs.notes_version }}
-          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
           set -euo pipefail
-          .github/scripts/changelog-notes.sh "$NOTES_VERSION" > notes.md
-          flags=()
-          if [ "$PRERELEASE" = "true" ]; then flags=(--prerelease --latest=false); fi
-          # Creates the release tag at the promoted commit if it doesn't exist yet.
-          gh release create "$RELEASE_TAG" dist/* --target "$SHA" --title "$RELEASE_TAG" \
-            --notes-file notes.md "${flags[@]}"
+          .github/scripts/changelog-notes.sh "$VERSION" > notes.md
+          # Creates the vx.y.z tag at the promoted commit if it doesn't exist yet.
+          gh release create "v$VERSION" dist/* --target "$SHA" --title "v$VERSION" --notes-file notes.md
