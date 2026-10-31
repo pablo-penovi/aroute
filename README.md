@@ -56,11 +56,11 @@ Coverage output is written to `coverage/`; open `coverage/merged/kcov-merged/ind
 
 ## Releasing
 
-1. In a PR, set the new version in `build.zig.zon` (`.version = "x.y.z"`) and move the `[Unreleased]` entries in `CHANGELOG.md` under a `## [x.y.z] - YYYY-MM-DD` heading.
-2. Merge the PR. Because the version is a plain `x.y.z` (no `-rc…` or other suffix), a draft release `vx.y.z` is created at the merge commit, with that CHANGELOG section as its notes. Later merges at the same version move the draft to the newest merge commit and refresh its notes.
-3. Review the draft and publish it as the latest release. That builds static binaries for `x86_64-linux` and `aarch64-linux`, attaches them, and sets the release notes to the CHANGELOG section.
+1. In a PR, set the new version in `build.zig.zon` (`.version = "x.y.z"`, or e.g. `"x.y.z-rc1"`) and move the `[Unreleased]` entries in `CHANGELOG.md` under a `## [x.y.z] - YYYY-MM-DD` heading.
+2. Merge the PR. The merge commit is tagged `vx.y.z`; no release is created.
+3. To release a tag, run the **Promote tag to release** workflow from the Actions tab (or `gh workflow run promote.yml -f tag=vx.y.z`). It builds static binaries for `x86_64-linux` and `aarch64-linux` at that tag and publishes a release with them, taking the notes from the version's section of `CHANGELOG.md` on `main`. Versions with a suffix (`-rc1`) become pre-releases.
 
-Pre-release versions such as `0.2.0-rc1` and the `0.0.0` placeholder never create a draft.
+The `0.0.0` placeholder is never tagged.
 
 Changes to `main` go through pull requests, which need approval from the code owner.
 

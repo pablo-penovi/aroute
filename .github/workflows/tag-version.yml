@@ -1,0 +1,61 @@
+name: Tag version
+
+# When a PR is merged into main, tag the merge commit with the version in
+# build.zig.zon (vx.y.z, or vx.y.z-rc1 and the like). No release is created;
+# run the "Promote tag to release" workflow for that.
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: tag-version
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag version
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Create tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          version=$(.github/scripts/zon-version.sh)
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::warning::Version $version in build.zig.zon is not x.y.z or x.y.z-suffix; no tag."
+            exit 0
+          fi
+          if [ "$version" = "0.0.0" ]; then
+            echo "::notice::Version is still the 0.0.0 placeholder; no tag."
+            exit 0
+          fi
+          tag="v$version"
+
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
+          if [ -z "$existing" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$SHA" >/dev/null
+            echo "::notice::Tagged $SHA as $tag."
+          elif [ "$existing" = "$SHA" ]; then
+            echo "::notice::$tag already points at $SHA."
+          else
+            echo "::notice::$tag already exists (at $existing); bump the version in build.zig.zon to tag this merge."
+          fi

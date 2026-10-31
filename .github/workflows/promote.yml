@@ -1,0 +1,130 @@
+name: Promote tag to release
+
+# Run by hand from the Actions tab: builds the Linux binaries at a version
+# tag and publishes a GitHub release for it, with the notes taken from that
+# version's section of CHANGELOG.md on main (so notes can still be fixed after
+# tagging). Versions with a suffix (e.g. 0.1.0-rc1) become pre-releases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to promote, e.g. v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ inputs.tag }}
+
+concurrency:
+  group: promote-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Check the tag can be promoted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::There is no tag $TAG."
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::$TAG already has a release."
+            exit 1
+          fi
+          git show "refs/tags/$TAG:build.zig.zon" > tag.zon
+          version=$(.github/scripts/zon-version.sh tag.zon)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match its build.zig.zon version $version."
+            exit 1
+          fi
+          if ! .github/scripts/changelog-notes.sh "$version" > /dev/null; then
+            echo "::error::CHANGELOG.md on main has no [$version] section; add one and run this again."
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Install Zig 0.17.0
+        run: |
+          set -euo pipefail
+          curl -L "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz" -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.17.0" >> "$GITHUB_PATH"
+
+      - name: Verify Zig
+        run: zig version
+
+      - name: Build
+        run: zig build -Doptimize=safe -Dstrip=true -Dtarget=${{ matrix.target }}
+
+      - name: Stage executable
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp zig-out/bin/aroute "dist/aroute-${{ matrix.target }}"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: aroute-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download executables
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          .github/scripts/changelog-notes.sh "$version" > notes.md
+          flags=()
+          if [[ $version == *-* ]]; then flags=(--prerelease --latest=false); fi
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
