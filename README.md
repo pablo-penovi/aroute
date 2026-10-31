@@ -58,7 +58,8 @@ Coverage output is written to `coverage/`; open `coverage/merged/kcov-merged/ind
 
 1. In a PR, set the new version in `build.zig.zon` (`.version = "x.y.z"`, or e.g. `"x.y.z-rc1"`) and move the `[Unreleased]` entries in `CHANGELOG.md` under a `## [x.y.z] - YYYY-MM-DD` heading.
 2. Merge the PR. The merge commit is tagged `vx.y.z`; no release is created.
-3. To release a tag, run the **Promote tag to release** workflow from the Actions tab (or `gh workflow run promote.yml -f tag=vx.y.z`). It builds static binaries for `x86_64-linux` and `aarch64-linux` at that tag and publishes a release with them, taking the notes from the version's section of `CHANGELOG.md` on `main`. Versions with a suffix (`-rc1`) become pre-releases.
+3. To release a tag, run the **Promote tag to release** workflow from the Actions tab (or `gh workflow run promote.yml -f tag=vx.y.z`). It builds static binaries for `x86_64-linux` and `aarch64-linux` at that tag and publishes a release with them, taking the notes from the version's section of `CHANGELOG.md` on `main`. 
+   Promoting a release candidate publishes the final version: running it with `v0.1.0-rc1` publishes release `v0.1.0` at the same commit (creating the `v0.1.0` tag), with the notes from `## [0.1.0]` if `CHANGELOG.md` has it, else from `## [0.1.0-rc1]`. Other suffixes (`-beta1`) are published under their own tag as pre-releases.
 
 The `0.0.0` placeholder is never tagged.
 
