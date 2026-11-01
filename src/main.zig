@@ -7,6 +7,7 @@ const pipewire = @import("pipewire.zig");
 const alsa = @import("alsa.zig");
 const tools = @import("tools.zig");
 const profile = @import("profile.zig");
+const load = @import("load.zig");
 const Aliases = @import("aliases.zig").Aliases;
 
 pub fn main(init: std.process.Init) !void {
@@ -35,6 +36,17 @@ pub fn main(init: std.process.Init) !void {
         const g = try scan(arena, io, aliases, show_all);
         const path = try save(arena, io, profiles_dir, name, g, aliases);
         try out.print("Saved {s}\n", .{path});
+    } else if (std.mem.eql(u8, command, "--load")) {
+        const name: []const u8 = if (args.len > 2) args[2] else "";
+        if (name.len == 0) die(io, "usage: aroute --load NAME [--force]", .{});
+        const flag: []const u8 = if (args.len > 3) args[3] else "";
+        if (flag.len > 0 and !std.mem.eql(u8, flag, "--force")) die(io, "unknown option '{s}' (try --help)", .{flag});
+        const g = try scan(arena, io, aliases, show_all);
+        const p = try load.plan(arena, g, try readProfile(arena, io, profiles_dir, name));
+        if (p.missing_audio.len > 0) try confirmMissing(io, name, p.missing_audio, flag.len > 0);
+        const result = try load.apply(arena, g, p, Wiring{ .arena = arena, .io = io });
+        try load.summary(out, name, p, result);
+        try out.writeByte('\n');
     } else if (command.len == 0) {
         die(io, "not implemented yet (see docs/design.md)", .{});
     } else {
@@ -53,6 +65,63 @@ fn save(arena: Allocator, io: Io, profiles_dir: []const u8, name: []const u8, g:
     Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = file.written() }) catch die(io, "could not write {s}", .{path});
     return path;
 }
+
+/// Slices of the file are kept in the result.
+fn readProfile(arena: Allocator, io: Io, profiles_dir: []const u8, name: []const u8) Allocator.Error!profile.Profile {
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}.conf", .{ profiles_dir, name });
+    const source = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 24)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => die(io, "no profile named '{s}'", .{name}),
+    };
+    return profile.parse(arena, source);
+}
+
+/// Lists the missing audio Devices on stderr. Unless `force`, asks whether to
+/// load anyway on a terminal, and gives up otherwise.
+fn confirmMissing(io: Io, name: []const u8, missing: []const []const u8, force: bool) !void {
+    var buf: [1024]u8 = undefined;
+    var stderr = Io.File.stderr().writer(io, &buf);
+    const w = &stderr.interface;
+    try w.print("aroute: these audio devices from '{s}' are not present:\n", .{name});
+    for (missing) |m| try w.print("  {s}\n", .{m});
+    try w.flush();
+    if (force) return;
+    if (!try Io.File.stdin().isTty(io)) die(io, "not loaded (use --force to hook up only the available connections)", .{});
+
+    try w.writeAll("Continue and hook up only the available connections? [y/N] ");
+    try w.flush();
+    var in_buf: [256]u8 = undefined;
+    var stdin = Io.File.stdin().reader(io, &in_buf);
+    const line = (stdin.interface.takeDelimiter('\n') catch null) orelse "";
+    // As bash's `read`, leading blanks are dropped.
+    const answer = std.mem.trimStart(u8, line, " \t");
+    if (answer.len == 0 or (answer[0] != 'y' and answer[0] != 'Y')) die(io, "not loaded", .{});
+}
+
+/// Changes the graph for `load.apply`.
+const Wiring = struct {
+    arena: Allocator,
+    io: Io,
+
+    pub fn connect(w: Wiring, ends: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
+        tools.connect(w.arena, w.io, ends) catch |err| return w.fail(err, ends);
+    }
+
+    pub fn disconnect(w: Wiring, ends: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
+        tools.disconnect(w.arena, w.io, ends) catch |err| return w.fail(err, ends);
+    }
+
+    fn fail(w: Wiring, err: tools.Error, ends: graph.Ends) error{ ToolFailed, OutOfMemory } {
+        return switch (err) {
+            error.MissingTool => die(w.io, "missing dependency: {s}", .{switch (ends) {
+                .pw => "pw-link",
+                .alsa => "aconnect",
+            }}),
+            error.ToolFailed => error.ToolFailed,
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    }
+};
 
 /// Local time as the script writes it (`date '+%F %T'`); empty, as in the
 /// script, if `date` fails.

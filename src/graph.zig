@@ -65,13 +65,16 @@ pub const Endpoint = struct {
     }
 };
 
+/// The Source-side and Destination-side Port of a Link: what `pw-link` or
+/// `aconnect` take to make it, or with `-d` to undo it.
+pub const Ends = union(Backend) {
+    pw: [2]u32,
+    alsa: [2]Addr,
+};
+
 /// One Port-to-Port wire.
 pub const Link = struct {
-    /// The Source-side and Destination-side Port: what `pw-link -d` or `aconnect -d` takes to undo it.
-    ends: union(Backend) {
-        pw: [2]u32,
-        alsa: [2]Addr,
-    },
+    ends: Ends,
     /// Port names as stored in profiles: `pw:<node.name>:<port.name>` or
     /// `alsa:<client name>:<port name>`.
     from_name: []const u8,
@@ -93,6 +96,18 @@ pub const Node = struct {
     label: []const u8,
 };
 
+/// A Port by the name profiles give it, and how to wire it.
+pub const NamedPort = struct {
+    /// `pw:<node.name>:<port.name>` or `alsa:<client name>:<port name>`.
+    name: []const u8,
+    direction: Direction,
+    kind: Kind,
+    /// Its PipeWire port id; for an ALSA Port, its Midi-Bridge port, if any.
+    pw: ?u32,
+    /// ALSA Ports only.
+    alsa: ?Addr = null,
+};
+
 pub const Graph = struct {
     endpoints: []Endpoint,
     /// In the order their first Link was found.
@@ -100,6 +115,9 @@ pub const Graph = struct {
     /// Every PipeWire node with Ports, one per `node.name` (as the script's
     /// NODE_BYNAME, the last one in port order when several share a name).
     nodes: []const Node = &.{},
+    /// Every ALSA Port (one per direction) and every PipeWire Port other than
+    /// Midi-Bridge ones, which go by their ALSA Port's name.
+    ports: []const NamedPort = &.{},
 
     pub fn applyAliases(g: *Graph, arena: Allocator, aliases: Aliases) Allocator.Error!void {
         for (g.endpoints) |*ep| ep.label = try aliases.apply(arena, ep.label);
@@ -108,6 +126,28 @@ pub const Graph = struct {
     pub fn nodeLabel(g: Graph, name: []const u8) ?[]const u8 {
         for (g.nodes) |n| if (std.mem.eql(u8, n.name, name)) return n.label;
         return null;
+    }
+
+    /// The Port with that name (and direction, for an ALSA Port, whose name
+    /// is the same both ways); the last one if several share it. As in the
+    /// script, a PipeWire Port's direction is not checked.
+    pub fn port(g: Graph, name: []const u8, direction: Direction) ?NamedPort {
+        var found: ?NamedPort = null;
+        for (g.ports) |p| {
+            if ((p.alsa == null or p.direction == direction) and std.mem.eql(u8, p.name, name)) found = p;
+        }
+        return found;
+    }
+
+    /// Whether a Device is in the graph, by its id in profiles:
+    /// `pw:<node.name>` or `alsa:<client name>`.
+    pub fn hasDevice(g: Graph, id: []const u8) bool {
+        if (std.mem.cutPrefix(u8, id, "pw:")) |name| return g.nodeLabel(name) != null;
+        for (g.ports) |p| {
+            const rest = std.mem.cutPrefix(u8, p.name, id) orelse continue;
+            if (p.alsa != null and rest.len > 0 and rest[0] == ':') return true;
+        }
+        return false;
     }
 
     /// Every Link as a `FROM|TO` line, sorted bytewise and without duplicates.

@@ -41,6 +41,15 @@ pub const Profile = struct {
     devices: []const Device,
     /// `FROM|TO` lines, as written.
     lines: []const []const u8,
+
+    /// The `# device` line for that id; the last one if there are several.
+    pub fn device(p: Profile, id: []const u8) ?Device {
+        var found: ?Device = null;
+        for (p.devices) |d| {
+            if (std.mem.eql(u8, d.id, id)) found = d;
+        }
+        return found;
+    }
 };
 
 /// Every Device a Link touches, in the order first seen. A Device is `audio`
