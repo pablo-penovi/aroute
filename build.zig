@@ -23,16 +23,18 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // One test artifact per root file; add new ones here as modules appear.
-    const tests = [_]*std.Build.Step.Compile{
-        b.addTest(.{
-            .name = "test-main",
+    const test_roots = [_][]const u8{ "main", "graph", "pipewire", "aliases", "cli", "tools" };
+    var tests: [test_roots.len]*std.Build.Step.Compile = undefined;
+    for (test_roots, &tests) |name, *t| {
+        t.* = b.addTest(.{
+            .name = b.fmt("test-{s}", .{name}),
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
+                .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
                 .target = target,
                 .optimize = optimize,
             }),
-        }),
-    };
+        });
+    }
 
     const test_step = b.step("test", "Run tests");
     for (tests) |t| test_step.dependOn(&b.addRunArtifact(t).step);
