@@ -236,7 +236,14 @@ pub fn parse(arena: Allocator, dump: []const u8, scan: alsa.Scan) ParseError!gra
     const connections = try arena.alloc(graph.Connection, pending.items.len);
     for (pending.items, connections) |p, *c| c.* = .{ .from = p.from, .to = p.to, .links = p.links.items };
 
-    return .{ .endpoints = endpoints.items, .connections = connections };
+    const named = try arena.alloc(graph.Node, node_by_name.count());
+    var it = node_by_name.iterator();
+    for (named) |*n| {
+        const e = it.next().?;
+        n.* = .{ .name = e.key_ptr.*, .label = nodeOf(nodes, e.value_ptr.*).label };
+    }
+
+    return .{ .endpoints = endpoints.items, .connections = connections, .nodes = named };
 }
 
 fn addLink(arena: Allocator, pending: *std.ArrayList(PendingConnection), from: usize, to: usize, link: graph.Link) Allocator.Error!void {

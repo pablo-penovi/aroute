@@ -35,6 +35,12 @@ pub fn aconnect(gpa: Allocator, io: Io, list: AconnectList) Error![]u8 {
     } });
 }
 
+/// The local time as `date '+%F %T'` prints it (`2026-11-01 16:45:00`),
+/// newline included. Caller owns the result.
+pub fn localTime(gpa: Allocator, io: Io) Error![]u8 {
+    return run(gpa, io, &.{ "date", "+%F %T" });
+}
+
 fn run(gpa: Allocator, io: Io, argv: []const []const u8) Error![]u8 {
     const result = std.process.run(gpa, io, .{ .argv = argv }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

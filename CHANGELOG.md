@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-11-01
+
+### Added
+
+- `aroute --save NAME` saves every current Connection as the Profile `${XDG_CONFIG_HOME:-~/.config}/aroute/profiles/NAME.conf`, in the script's format: the header, a `# device <audio|midi> <id>=<label>` line per Device (`audio` if any of its Connections are, label with aliases applied), then the `FROM|TO` snapshot. An existing Profile is overwritten. Names may only use letters, digits, space, `.`, `_` and `-`. Unlike the script, saving with no Connections reports success.
+- `aroute --profiles` lists the saved Profiles, one per line, sorted close to how the script's glob sorts them in an en_US.UTF-8 locale (the same for ordinary names). Unlike the script, names starting with `.` are listed too.
+
 ## [0.0.3] - 2026-11-01
 
 ### Added
