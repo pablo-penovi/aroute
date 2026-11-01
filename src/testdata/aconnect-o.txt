@@ -1,0 +1,9 @@
+client 14: 'Midi Through' [type=kernel]
+    0 'Midi Through Port-0'
+client 128: 'WORLDE' [type=user,pid=28265]
+    0 'WORLDE MIDI 1   '
+client 129: 'Clipper' [type=user,pid=28266]
+    0 'Clipper MIDI 1  '
+    1 'Clipper MIDI 2  '
+client 130: 'Keys 'n' Pads' [type=user,pid=28267]
+    0 'Keys MIDI 1     '
