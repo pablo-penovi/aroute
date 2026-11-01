@@ -86,13 +86,28 @@ pub const Connection = struct {
     links: []const Link,
 };
 
+/// A PipeWire node's display name, by `node.name`: how profiles label a Device.
+pub const Node = struct {
+    name: []const u8,
+    /// Without aliases: profiles apply them to the whole Device label.
+    label: []const u8,
+};
+
 pub const Graph = struct {
     endpoints: []Endpoint,
     /// In the order their first Link was found.
     connections: []const Connection,
+    /// Every PipeWire node with Ports, one per `node.name` (as the script's
+    /// NODE_BYNAME, the last one in port order when several share a name).
+    nodes: []const Node = &.{},
 
     pub fn applyAliases(g: *Graph, arena: Allocator, aliases: Aliases) Allocator.Error!void {
         for (g.endpoints) |*ep| ep.label = try aliases.apply(arena, ep.label);
+    }
+
+    pub fn nodeLabel(g: Graph, name: []const u8) ?[]const u8 {
+        for (g.nodes) |n| if (std.mem.eql(u8, n.name, name)) return n.label;
+        return null;
     }
 
     /// Every Link as a `FROM|TO` line, sorted bytewise and without duplicates.

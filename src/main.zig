@@ -6,6 +6,7 @@ const graph = @import("graph.zig");
 const pipewire = @import("pipewire.zig");
 const alsa = @import("alsa.zig");
 const tools = @import("tools.zig");
+const profile = @import("profile.zig");
 const Aliases = @import("aliases.zig").Aliases;
 
 pub fn main(init: std.process.Init) !void {
@@ -14,22 +15,67 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     const config_dir = try configDir(arena, init.environ_map.*);
 
+    const profiles_dir = try std.fs.path.join(arena, &.{ config_dir, "profiles" });
+    const aliases = try readAliases(arena, io, config_dir);
+    const show_all = showAll(init.environ_map.*);
+
+    var buf: [4096]u8 = undefined;
+    var stdout = Io.File.stdout().writer(io, &buf);
+    const out = &stdout.interface;
+
     const command: []const u8 = if (args.len > 1) args[1] else "";
     if (std.mem.eql(u8, command, "--list")) {
-        const g = try scan(arena, io, config_dir, showAll(init.environ_map.*));
-        var buf: [4096]u8 = undefined;
-        var stdout = Io.File.stdout().writer(io, &buf);
-        try cli.list(&stdout.interface, arena, g);
-        try stdout.interface.flush();
+        try cli.list(out, arena, try scan(arena, io, aliases, show_all));
+    } else if (std.mem.eql(u8, command, "--profiles")) {
+        for (try profileNames(arena, io, profiles_dir)) |name| try out.print("{s}\n", .{name});
+    } else if (std.mem.eql(u8, command, "--save")) {
+        const name: []const u8 = if (args.len > 2) args[2] else "";
+        if (name.len == 0) die(io, "usage: aroute --save NAME", .{});
+        if (!profile.validName(name)) die(io, profile.invalid_name, .{});
+        const g = try scan(arena, io, aliases, show_all);
+        const path = try save(arena, io, profiles_dir, name, g, aliases);
+        try out.print("Saved {s}\n", .{path});
     } else if (command.len == 0) {
         die(io, "not implemented yet (see docs/design.md)", .{});
     } else {
         die(io, "unknown option '{s}' (try --help)", .{command});
     }
+    try out.flush();
 }
 
-/// Reads the graph, with aliases applied to every label.
-fn scan(arena: Allocator, io: Io, config_dir: []const u8, show_all: bool) !graph.Graph {
+/// Writes every current Link as the Profile `name`, overwriting it, and
+/// returns its path.
+fn save(arena: Allocator, io: Io, profiles_dir: []const u8, name: []const u8, g: graph.Graph, aliases: Aliases) ![]const u8 {
+    var file: Io.Writer.Allocating = .init(arena);
+    try profile.write(&file.writer, arena, name, try savedAt(arena, io), g, aliases);
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}.conf", .{ profiles_dir, name });
+    Io.Dir.cwd().createDirPath(io, profiles_dir) catch die(io, "could not write {s}", .{path});
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = file.written() }) catch die(io, "could not write {s}", .{path});
+    return path;
+}
+
+/// Local time as the script writes it (`date '+%F %T'`); empty, as in the
+/// script, if `date` fails.
+fn savedAt(arena: Allocator, io: Io) Allocator.Error![]const u8 {
+    const now = tools.localTime(arena, io) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return "",
+    };
+    return std.mem.trimEnd(u8, now, "\n");
+}
+
+/// No profiles directory, or an unreadable one, means no Profiles.
+fn profileNames(arena: Allocator, io: Io, profiles_dir: []const u8) Allocator.Error![]const []const u8 {
+    var dir = Io.Dir.cwd().openDir(io, profiles_dir, .{ .iterate = true }) catch return &.{};
+    defer dir.close(io);
+    return profile.names(arena, io, dir) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => &.{},
+    };
+}
+
+/// Reads the graph, with aliases applied to every Endpoint label.
+fn scan(arena: Allocator, io: Io, aliases: Aliases, show_all: bool) !graph.Graph {
     const dump = tools.pwDump(arena, io) catch |err| switch (err) {
         error.MissingTool => die(io, "missing dependency: pw-dump", .{}),
         error.ToolFailed => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
@@ -44,7 +90,7 @@ fn scan(arena: Allocator, io: Io, config_dir: []const u8, show_all: bool) !graph
         error.InvalidDump => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
         else => |e| return e,
     };
-    try g.applyAliases(arena, try readAliases(arena, io, config_dir));
+    try g.applyAliases(arena, aliases);
     return g;
 }
 
