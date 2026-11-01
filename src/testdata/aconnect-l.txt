@@ -1,0 +1,33 @@
+client 0: 'System' [type=kernel]
+    0 'Timer           '
+	Connecting To: 144:0
+    1 'Announce        '
+	Connecting To: 144:0
+client 14: 'Midi Through' [type=kernel]
+    0 'Midi Through Port-0'
+	Connecting To: 145:0[real:1]
+	Connected From: 130:0, 145:0[real:1]
+client 128: 'WORLDE' [type=user,pid=28265]
+    0 'WORLDE MIDI 1   '
+	Connecting To: 129:1, 145:0[real:1]
+	Connected From: 130:1, 145:0[real:1]
+client 129: 'Clipper' [type=user,pid=28266]
+    0 'Clipper MIDI 1  '
+	Connecting To: 145:0[real:1]
+	Connected From: 145:0[real:1]
+    1 'Clipper MIDI 2  '
+	Connecting To: 145:0[real:1]
+	Connected From: 128:0, 145:0[real:1]
+client 130: 'Keys 'n' Pads' [type=user,pid=28267]
+    0 'Keys MIDI 1     '
+	Connecting To: 14:0, 145:0[real:1]
+	Connected From: 145:0[real:1]
+    1 'Keys Sync       '
+	Connecting To: 128:0, 145:0[real:1]
+client 144: 'PipeWire-System' [type=user,pid=1699]
+    0 'input           '
+	Connected From: 0:1, 0:0
+client 145: 'PipeWire-RT-Event' [type=user,pid=1699]
+    0 'input           '
+	Connecting To: 14:0[real:1], 128:0[real:1], 129:0[real:1], 129:1[real:1], 130:0[real:1]
+	Connected From: 14:0[real:1], 128:0[real:1], 129:0[real:1], 129:1[real:1], 130:0[real:1], 130:1[real:1]

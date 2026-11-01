@@ -1,5 +1,5 @@
 //! Runs the PipeWire and ALSA command-line tools (ADR 0001). Nothing here
-//! interprets their output; see `pipewire.zig` for that.
+//! interprets their output; see `pipewire.zig` and `alsa.zig` for that.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -15,6 +15,24 @@ pub const Error = error{
 /// The whole PipeWire graph as JSON. Caller owns the result.
 pub fn pwDump(gpa: Allocator, io: Io) Error![]u8 {
     return run(gpa, io, &.{"pw-dump"});
+}
+
+pub const AconnectList = enum {
+    /// `-i`: readable Ports.
+    sources,
+    /// `-o`: writable Ports.
+    destinations,
+    /// `-l`: every Port and its subscriptions.
+    connections,
+};
+
+/// The ALSA sequencer Ports as `aconnect` lists them. Caller owns the result.
+pub fn aconnect(gpa: Allocator, io: Io, list: AconnectList) Error![]u8 {
+    return run(gpa, io, &.{ "aconnect", switch (list) {
+        .sources => "-i",
+        .destinations => "-o",
+        .connections => "-l",
+    } });
 }
 
 fn run(gpa: Allocator, io: Io, argv: []const []const u8) Error![]u8 {

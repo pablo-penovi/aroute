@@ -4,6 +4,7 @@ const Io = std.Io;
 const cli = @import("cli.zig");
 const graph = @import("graph.zig");
 const pipewire = @import("pipewire.zig");
+const alsa = @import("alsa.zig");
 const tools = @import("tools.zig");
 const Aliases = @import("aliases.zig").Aliases;
 
@@ -15,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
 
     const command: []const u8 = if (args.len > 1) args[1] else "";
     if (std.mem.eql(u8, command, "--list")) {
-        const g = try scan(arena, io, config_dir);
+        const g = try scan(arena, io, config_dir, showAll(init.environ_map.*));
         var buf: [4096]u8 = undefined;
         var stdout = Io.File.stdout().writer(io, &buf);
         try cli.list(&stdout.interface, arena, g);
@@ -28,18 +29,37 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// Reads the graph, with aliases applied to every label.
-fn scan(arena: Allocator, io: Io, config_dir: []const u8) !graph.Graph {
+fn scan(arena: Allocator, io: Io, config_dir: []const u8, show_all: bool) !graph.Graph {
     const dump = tools.pwDump(arena, io) catch |err| switch (err) {
         error.MissingTool => die(io, "missing dependency: pw-dump", .{}),
         error.ToolFailed => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
         else => |e| return e,
     };
-    var g = pipewire.parse(arena, dump) catch |err| switch (err) {
+    const midi = try alsa.parse(arena, .{
+        .sources = try aconnect(arena, io, .sources),
+        .destinations = try aconnect(arena, io, .destinations),
+        .connections = try aconnect(arena, io, .connections),
+    }, show_all);
+    var g = pipewire.parse(arena, dump, midi) catch |err| switch (err) {
         error.InvalidDump => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
         else => |e| return e,
     };
     try g.applyAliases(arena, try readAliases(arena, io, config_dir));
     return g;
+}
+
+/// Like the script, a failing `aconnect` (e.g. no ALSA sequencer) just means no ALSA MIDI.
+fn aconnect(arena: Allocator, io: Io, list: tools.AconnectList) Allocator.Error![]const u8 {
+    return tools.aconnect(arena, io, list) catch |err| switch (err) {
+        error.MissingTool => die(io, "missing dependency: aconnect", .{}),
+        error.ToolFailed => "",
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// `AROUTE_SHOW_ALL=1` also lists the normally hidden Midi Through clients and Sync ports.
+fn showAll(env: std.process.Environ.Map) bool {
+    return std.mem.eql(u8, env.get("AROUTE_SHOW_ALL") orelse "", "1");
 }
 
 /// A missing or unreadable aliases file means no aliases.
@@ -80,4 +100,16 @@ test "config dir follows XDG_CONFIG_HOME, falling back to ~/.config" {
     try std.testing.expectEqualStrings("/home/u/.config/aroute", try configDir(arena, env));
     try env.put("XDG_CONFIG_HOME", "/xdg");
     try std.testing.expectEqualStrings("/xdg/aroute", try configDir(arena, env));
+}
+
+test "AROUTE_SHOW_ALL is on only when it is 1" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expect(!showAll(env));
+    try env.put("AROUTE_SHOW_ALL", "0");
+    try std.testing.expect(!showAll(env));
+    try env.put("AROUTE_SHOW_ALL", "yes");
+    try std.testing.expect(!showAll(env));
+    try env.put("AROUTE_SHOW_ALL", "1");
+    try std.testing.expect(showAll(env));
 }

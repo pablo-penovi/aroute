@@ -13,23 +13,67 @@ pub const Kind = enum { audio, midi };
 /// Which tool the Endpoint's Ports are wired through.
 pub const Backend = enum { pw, alsa };
 
+/// An ALSA sequencer Port, as `aconnect` writes it: `client:port`.
+pub const Addr = struct {
+    client: u16,
+    port: u16,
+
+    /// `128:0`; null for anything else.
+    pub fn parse(s: []const u8) ?Addr {
+        const colon = std.mem.findScalar(u8, s, ':') orelse return null;
+        return .{
+            .client = number(s[0..colon]) orelse return null,
+            .port = number(s[colon + 1 ..]) orelse return null,
+        };
+    }
+
+    pub fn format(a: Addr, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("{d}:{d}", .{ a.client, a.port });
+    }
+};
+
+/// Digits only, no sign: what the script's `[0-9]+` accepts.
+pub fn number(s: []const u8) ?u16 {
+    if (s.len == 0) return null;
+    for (s) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(u16, s, 10) catch null;
+}
+
+pub const Ports = union(Backend) {
+    /// PipeWire port ids, in port order.
+    pw: []const u32,
+    alsa: struct {
+        addr: Addr,
+        /// The Midi-Bridge's PipeWire port for it, through which it is wired
+        /// to PipeWire-only MIDI Ports (e.g. BLE MIDI).
+        bridge: ?u32 = null,
+    },
+};
+
 pub const Endpoint = struct {
     /// Display name, with aliases applied once `Graph.applyAliases` has run.
     label: []const u8,
     kind: Kind,
     direction: Direction,
-    backend: Backend,
-    /// PipeWire port ids, in port order.
-    ports: []const u32,
+    /// Which tool its Ports are wired through, and their ids in that tool.
+    ports: Ports,
     /// Kept so existing Links to it can be shown and undone, but never offered in a column.
     hidden: bool = false,
+
+    pub fn backend(ep: Endpoint) Backend {
+        return ep.ports;
+    }
 };
 
 /// One Port-to-Port wire.
 pub const Link = struct {
-    out_port: u32,
-    in_port: u32,
-    /// Port names as stored in profiles: `pw:<node.name>:<port.name>`.
+    /// The Source-side and Destination-side Port: what `pw-link -d` or `aconnect -d` takes to undo it.
+    ends: union(Backend) {
+        pw: [2]u32,
+        alsa: [2]Addr,
+    },
+    /// Port names as stored in profiles: `pw:<node.name>:<port.name>` or
+    /// `alsa:<client name>:<port name>`.
     from_name: []const u8,
     to_name: []const u8,
 };
@@ -81,12 +125,12 @@ test "snapshot is sorted and unique across Connections" {
         .endpoints = &.{},
         .connections = &.{
             .{ .from = 0, .to = 1, .links = &.{
-                .{ .out_port = 3, .in_port = 4, .from_name = "pw:b:out_FR", .to_name = "pw:c:in_FR" },
-                .{ .out_port = 2, .in_port = 5, .from_name = "pw:b:out_FL", .to_name = "pw:c:in_FL" },
+                .{ .ends = .{ .pw = .{ 3, 4 } }, .from_name = "pw:b:out_FR", .to_name = "pw:c:in_FR" },
+                .{ .ends = .{ .pw = .{ 2, 5 } }, .from_name = "pw:b:out_FL", .to_name = "pw:c:in_FL" },
             } },
             .{ .from = 2, .to = 1, .links = &.{
-                .{ .out_port = 9, .in_port = 4, .from_name = "pw:a:out", .to_name = "pw:c:in_FR" },
-                .{ .out_port = 3, .in_port = 4, .from_name = "pw:b:out_FR", .to_name = "pw:c:in_FR" },
+                .{ .ends = .{ .pw = .{ 9, 4 } }, .from_name = "pw:a:out", .to_name = "pw:c:in_FR" },
+                .{ .ends = .{ .pw = .{ 3, 4 } }, .from_name = "pw:b:out_FR", .to_name = "pw:c:in_FR" },
             } },
         },
     };
@@ -100,4 +144,14 @@ test "snapshot is sorted and unique across Connections" {
 test "empty graph has an empty snapshot" {
     const g: Graph = .{ .endpoints = &.{}, .connections = &.{} };
     try std.testing.expectEqual(0, (try g.snapshot(std.testing.allocator)).len);
+}
+
+test "ALSA addresses" {
+    const a = Addr.parse("128:3").?;
+    try std.testing.expectEqual(Addr{ .client = 128, .port = 3 }, a);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("128:3", try std.fmt.bufPrint(&buf, "{f}", .{a}));
+    for ([_][]const u8{ "", "128", "128:", ":0", "+1:0", "1:-0", "1:0:2", "70000:0", "a:b" }) |s| {
+        try std.testing.expectEqual(null, Addr.parse(s));
+    }
 }

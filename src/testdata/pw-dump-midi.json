@@ -1,0 +1,1429 @@
+[
+  {
+    "id": 29,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "Dummy-Driver"
+      }
+    }
+  },
+  {
+    "id": 30,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "Freewheel-Driver"
+      }
+    }
+  },
+  {
+    "id": 31,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "media.class": "Audio/Source/Virtual",
+        "node.description": "Renoise Virtual",
+        "node.name": "renoise_source"
+      }
+    }
+  },
+  {
+    "id": 44,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 31,
+        "object.path": "renoise_source:input_0",
+        "port.alias": "Renoise Virtual:input_FL",
+        "port.id": 0,
+        "port.name": "input_FL"
+      }
+    }
+  },
+  {
+    "id": 45,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 31,
+        "object.path": "renoise_source:input_1",
+        "port.alias": "Renoise Virtual:input_FR",
+        "port.id": 1,
+        "port.name": "input_FR"
+      }
+    }
+  },
+  {
+    "id": 46,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 31,
+        "object.path": "renoise_source:capture_0",
+        "port.alias": "Renoise Virtual:capture_FL",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "capture_FL"
+      }
+    }
+  },
+  {
+    "id": 47,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 31,
+        "object.path": "renoise_source:capture_1",
+        "port.alias": "Renoise Virtual:capture_FR",
+        "port.id": 1,
+        "port.monitor": true,
+        "port.name": "capture_FR"
+      }
+    }
+  },
+  {
+    "id": 53,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Midi/Bridge",
+        "node.name": "Midi-Bridge"
+      }
+    }
+  },
+  {
+    "id": 54,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_14:playback_0",
+        "port.alias": "Midi Through:Midi Through Port-0",
+        "port.id": 0,
+        "port.name": "Midi Through: Port-0 (playback)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 55,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_14:capture_0",
+        "port.alias": "Midi Through:Midi Through Port-0",
+        "port.id": 0,
+        "port.name": "Midi Through: Port-0 (capture)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 56,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Source",
+        "node.description": "USB Video Analog Stereo",
+        "node.name": "alsa_input.usb-MACROSILICON_USB_Video-02.analog-stereo",
+        "node.nick": "MS2109",
+        "object.path": "alsa:acp:MS2109:0:capture"
+      }
+    }
+  },
+  {
+    "id": 57,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Sink",
+        "node.description": "Navi 21/23 HDMI/DP Audio Controller Digital Stereo (HDMI 3) [LS32AG32x]",
+        "node.name": "alsa_output.pci-0000_0d_00.1.hdmi-stereo-extra2",
+        "node.nick": "LS32AG32x",
+        "object.path": "alsa:acp:HDMI:12:playback"
+      }
+    }
+  },
+  {
+    "id": 58,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "bluez5",
+        "media.class": "Midi/Bridge",
+        "node.description": "BLE MIDI 1",
+        "node.name": "bluez_midi.server"
+      }
+    }
+  },
+  {
+    "id": 59,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 58,
+        "object.path": "bluez_midi.server:input_0",
+        "port.alias": "in",
+        "port.id": 0,
+        "port.name": "in",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 60,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 58,
+        "object.path": "bluez_midi.server:output_0",
+        "port.alias": "out",
+        "port.id": 0,
+        "port.name": "out",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 62,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "media.class": "Stream/Output/Audio/Internal",
+        "media.name": "Split MiniFuse 1 Loopback L/R output",
+        "node.description": "Split MiniFuse 1 Loopback L/R",
+        "node.name": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__sink.split"
+      }
+    }
+  },
+  {
+    "id": 63,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Sink",
+        "media.name": "MiniFuse 1 Loopback L/R input",
+        "node.description": "MiniFuse 1 Loopback L/R",
+        "node.name": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__sink",
+        "node.nick": "MiniFuse 1",
+        "object.path": "alsa:acp:M1:2:playback"
+      }
+    }
+  },
+  {
+    "id": 65,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "media.class": "Stream/Output/Audio/Internal",
+        "media.name": "Split MiniFuse 1 Main Output L/R output",
+        "node.description": "Split MiniFuse 1 Main Output L/R",
+        "node.name": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line1__sink.split"
+      }
+    }
+  },
+  {
+    "id": 66,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Sink",
+        "media.name": "MiniFuse 1 Main Output L/R input",
+        "node.description": "MiniFuse 1 Main Output L/R",
+        "node.name": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line1__sink",
+        "node.nick": "MiniFuse 1",
+        "object.path": "alsa:acp:M1:3:playback"
+      }
+    }
+  },
+  {
+    "id": 68,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Source",
+        "media.name": "MiniFuse 1 Loopback L/R output",
+        "node.description": "MiniFuse 1 Loopback L/R",
+        "node.name": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__source",
+        "node.nick": "MiniFuse 1",
+        "object.path": "alsa:acp:M1:4:capture"
+      }
+    }
+  },
+  {
+    "id": 69,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "media.class": "Stream/Input/Audio/Internal",
+        "media.name": "Split MiniFuse 1 Loopback L/R input",
+        "node.description": "Split MiniFuse 1 Loopback L/R",
+        "node.name": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__source.split"
+      }
+    }
+  },
+  {
+    "id": 71,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Source",
+        "media.name": "MiniFuse 1 Mic/Line/Inst 1 (L) output",
+        "node.description": "MiniFuse 1 Mic/Line/Inst 1 (L)",
+        "node.name": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Mic__source",
+        "node.nick": "MiniFuse 1",
+        "object.path": "alsa:acp:M1:5:capture"
+      }
+    }
+  },
+  {
+    "id": 72,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "media.class": "Stream/Input/Audio/Internal",
+        "media.name": "Split MiniFuse 1 Mic/Line/Inst 1 (L) input",
+        "node.description": "Split MiniFuse 1 Mic/Line/Inst 1 (L)",
+        "node.name": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Mic__source.split"
+      }
+    }
+  },
+  {
+    "id": 74,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Sink/Internal",
+        "node.description": "MiniFuse 1 0",
+        "node.name": "alsa_output.hw_M1_0",
+        "node.nick": "MiniFuse 1",
+        "object.path": "alsa:acp:M1:2:playback"
+      }
+    }
+  },
+  {
+    "id": 75,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Source/Internal",
+        "node.description": "MiniFuse 1 0",
+        "node.name": "alsa_input.hw_M1_0",
+        "node.nick": "MiniFuse 1",
+        "object.path": "alsa:acp:M1:4:capture"
+      }
+    }
+  },
+  {
+    "id": 77,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Sink",
+        "node.description": "Starship/Matisse HD Audio Controller Digital Stereo (IEC958)",
+        "node.name": "alsa_output.pci-0000_0f_00.4.iec958-stereo",
+        "node.nick": "ALC887-VD Digital",
+        "object.path": "alsa:acp:Generic:6:playback"
+      }
+    }
+  },
+  {
+    "id": 78,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "alsa",
+        "media.class": "Audio/Source",
+        "node.description": "Starship/Matisse HD Audio Controller Analog Stereo",
+        "node.name": "alsa_input.pci-0000_0f_00.4.analog-stereo",
+        "node.nick": "ALC887-VD Analog",
+        "object.path": "alsa:acp:Generic:0:capture"
+      }
+    }
+  },
+  {
+    "id": 79,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 56,
+        "object.path": "alsa:acp:MS2109:0:capture:capture_0",
+        "port.alias": "MS2109:capture_FL",
+        "port.id": 0,
+        "port.name": "capture_FL",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 80,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 56,
+        "object.path": "alsa:acp:MS2109:0:capture:capture_1",
+        "port.alias": "MS2109:capture_FR",
+        "port.id": 1,
+        "port.name": "capture_FR",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 81,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 57,
+        "object.path": "alsa:acp:HDMI:12:playback:playback_0",
+        "port.alias": "LS32AG32x:playback_FL",
+        "port.id": 0,
+        "port.name": "playback_FL",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 82,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 57,
+        "object.path": "alsa:acp:HDMI:12:playback:playback_1",
+        "port.alias": "LS32AG32x:playback_FR",
+        "port.id": 1,
+        "port.name": "playback_FR",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 83,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 57,
+        "object.path": "alsa:acp:HDMI:12:playback:monitor_0",
+        "port.alias": "LS32AG32x:monitor_FL",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "monitor_FL"
+      }
+    }
+  },
+  {
+    "id": 84,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 57,
+        "object.path": "alsa:acp:HDMI:12:playback:monitor_1",
+        "port.alias": "LS32AG32x:monitor_FR",
+        "port.id": 1,
+        "port.monitor": true,
+        "port.name": "monitor_FR"
+      }
+    }
+  },
+  {
+    "id": 85,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX2",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 62,
+        "object.path": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__sink.split:output_0",
+        "port.alias": "Split MiniFuse 1 Loopback L/R:output_AUX2",
+        "port.id": 0,
+        "port.name": "output_AUX2"
+      }
+    }
+  },
+  {
+    "id": 86,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX3",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 62,
+        "object.path": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__sink.split:output_1",
+        "port.alias": "Split MiniFuse 1 Loopback L/R:output_AUX3",
+        "port.id": 1,
+        "port.name": "output_AUX3"
+      }
+    }
+  },
+  {
+    "id": 87,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 63,
+        "object.path": "alsa:acp:M1:2:playback:playback_0",
+        "port.alias": "MiniFuse 1:playback_FL",
+        "port.id": 0,
+        "port.name": "playback_FL"
+      }
+    }
+  },
+  {
+    "id": 88,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 63,
+        "object.path": "alsa:acp:M1:2:playback:playback_1",
+        "port.alias": "MiniFuse 1:playback_FR",
+        "port.id": 1,
+        "port.name": "playback_FR"
+      }
+    }
+  },
+  {
+    "id": 89,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 63,
+        "object.path": "alsa:acp:M1:2:playback:monitor_0",
+        "port.alias": "MiniFuse 1:monitor_FL",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "monitor_FL"
+      }
+    }
+  },
+  {
+    "id": 90,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 63,
+        "object.path": "alsa:acp:M1:2:playback:monitor_1",
+        "port.alias": "MiniFuse 1:monitor_FR",
+        "port.id": 1,
+        "port.monitor": true,
+        "port.name": "monitor_FR"
+      }
+    }
+  },
+  {
+    "id": 91,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX0",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 65,
+        "object.path": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line1__sink.split:output_0",
+        "port.alias": "Split MiniFuse 1 Main Output L/R:output_AUX0",
+        "port.id": 0,
+        "port.name": "output_AUX0"
+      }
+    }
+  },
+  {
+    "id": 92,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX1",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 65,
+        "object.path": "alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line1__sink.split:output_1",
+        "port.alias": "Split MiniFuse 1 Main Output L/R:output_AUX1",
+        "port.id": 1,
+        "port.name": "output_AUX1"
+      }
+    }
+  },
+  {
+    "id": 93,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 66,
+        "object.path": "alsa:acp:M1:3:playback:playback_0",
+        "port.alias": "MiniFuse 1:playback_FL",
+        "port.id": 0,
+        "port.name": "playback_FL"
+      }
+    }
+  },
+  {
+    "id": 94,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 66,
+        "object.path": "alsa:acp:M1:3:playback:playback_1",
+        "port.alias": "MiniFuse 1:playback_FR",
+        "port.id": 1,
+        "port.name": "playback_FR"
+      }
+    }
+  },
+  {
+    "id": 95,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 66,
+        "object.path": "alsa:acp:M1:3:playback:monitor_0",
+        "port.alias": "MiniFuse 1:monitor_FL",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "monitor_FL"
+      }
+    }
+  },
+  {
+    "id": 96,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 66,
+        "object.path": "alsa:acp:M1:3:playback:monitor_1",
+        "port.alias": "MiniFuse 1:monitor_FR",
+        "port.id": 1,
+        "port.monitor": true,
+        "port.name": "monitor_FR"
+      }
+    }
+  },
+  {
+    "id": 97,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 68,
+        "object.path": "alsa:acp:M1:4:capture:capture_0",
+        "port.alias": "MiniFuse 1:capture_FL",
+        "port.id": 0,
+        "port.name": "capture_FL"
+      }
+    }
+  },
+  {
+    "id": 98,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 68,
+        "object.path": "alsa:acp:M1:4:capture:capture_1",
+        "port.alias": "MiniFuse 1:capture_FR",
+        "port.id": 1,
+        "port.name": "capture_FR"
+      }
+    }
+  },
+  {
+    "id": 100,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "AUX2",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 69,
+        "object.path": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__source.split:input_0",
+        "port.alias": "Split MiniFuse 1 Loopback L/R:input_AUX2",
+        "port.id": 0,
+        "port.name": "input_AUX2"
+      }
+    }
+  },
+  {
+    "id": 101,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "AUX3",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 69,
+        "object.path": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__source.split:input_1",
+        "port.alias": "Split MiniFuse 1 Loopback L/R:input_AUX3",
+        "port.id": 1,
+        "port.name": "input_AUX3"
+      }
+    }
+  },
+  {
+    "id": 102,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX2",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 69,
+        "object.path": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__source.split:monitor_0",
+        "port.alias": "Split MiniFuse 1 Loopback L/R:monitor_AUX2",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "monitor_AUX2"
+      }
+    }
+  },
+  {
+    "id": 103,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX3",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 69,
+        "object.path": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line2__source.split:monitor_1",
+        "port.alias": "Split MiniFuse 1 Loopback L/R:monitor_AUX3",
+        "port.id": 1,
+        "port.monitor": true,
+        "port.name": "monitor_AUX3"
+      }
+    }
+  },
+  {
+    "id": 99,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "MONO",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 71,
+        "object.path": "alsa:acp:M1:5:capture:capture_0",
+        "port.alias": "MiniFuse 1:capture_MONO",
+        "port.id": 0,
+        "port.name": "capture_MONO"
+      }
+    }
+  },
+  {
+    "id": 104,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "AUX0",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 72,
+        "object.path": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Mic__source.split:input_0",
+        "port.alias": "Split MiniFuse 1 Mic/Line/Inst 1 (L):input_AUX0",
+        "port.id": 0,
+        "port.name": "input_AUX0"
+      }
+    }
+  },
+  {
+    "id": 105,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX0",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 72,
+        "object.path": "alsa_input.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Mic__source.split:monitor_0",
+        "port.alias": "Split MiniFuse 1 Mic/Line/Inst 1 (L):monitor_AUX0",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "monitor_AUX0"
+      }
+    }
+  },
+  {
+    "id": 106,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "AUX0",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:playback_0",
+        "port.alias": "MiniFuse 1:playback_AUX0",
+        "port.id": 0,
+        "port.name": "playback_AUX0",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 107,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "AUX1",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:playback_1",
+        "port.alias": "MiniFuse 1:playback_AUX1",
+        "port.id": 1,
+        "port.name": "playback_AUX1",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 108,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "AUX2",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:playback_2",
+        "port.alias": "MiniFuse 1:playback_AUX2",
+        "port.id": 2,
+        "port.name": "playback_AUX2",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 109,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "AUX3",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:playback_3",
+        "port.alias": "MiniFuse 1:playback_AUX3",
+        "port.id": 3,
+        "port.name": "playback_AUX3",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 110,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX0",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:monitor_0",
+        "port.alias": "MiniFuse 1:monitor_AUX0",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "monitor_AUX0"
+      }
+    }
+  },
+  {
+    "id": 111,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX1",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:monitor_1",
+        "port.alias": "MiniFuse 1:monitor_AUX1",
+        "port.id": 1,
+        "port.monitor": true,
+        "port.name": "monitor_AUX1"
+      }
+    }
+  },
+  {
+    "id": 112,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX2",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:monitor_2",
+        "port.alias": "MiniFuse 1:monitor_AUX2",
+        "port.id": 2,
+        "port.monitor": true,
+        "port.name": "monitor_AUX2"
+      }
+    }
+  },
+  {
+    "id": 113,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX3",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 74,
+        "object.path": "alsa:acp:M1:2:playback:monitor_3",
+        "port.alias": "MiniFuse 1:monitor_AUX3",
+        "port.id": 3,
+        "port.monitor": true,
+        "port.name": "monitor_AUX3"
+      }
+    }
+  },
+  {
+    "id": 114,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX0",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 75,
+        "object.path": "alsa:acp:M1:4:capture:capture_0",
+        "port.alias": "MiniFuse 1:capture_AUX0",
+        "port.id": 0,
+        "port.name": "capture_AUX0",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 115,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX1",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 75,
+        "object.path": "alsa:acp:M1:4:capture:capture_1",
+        "port.alias": "MiniFuse 1:capture_AUX1",
+        "port.id": 1,
+        "port.name": "capture_AUX1",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 116,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX2",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 75,
+        "object.path": "alsa:acp:M1:4:capture:capture_2",
+        "port.alias": "MiniFuse 1:capture_AUX2",
+        "port.id": 2,
+        "port.name": "capture_AUX2",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 117,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "AUX3",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 75,
+        "object.path": "alsa:acp:M1:4:capture:capture_3",
+        "port.alias": "MiniFuse 1:capture_AUX3",
+        "port.id": 3,
+        "port.name": "capture_AUX3",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 118,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 77,
+        "object.path": "alsa:acp:Generic:6:playback:playback_0",
+        "port.alias": "ALC887-VD Digital:playback_FL",
+        "port.id": 0,
+        "port.name": "playback_FL",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 119,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 77,
+        "object.path": "alsa:acp:Generic:6:playback:playback_1",
+        "port.alias": "ALC887-VD Digital:playback_FR",
+        "port.id": 1,
+        "port.name": "playback_FR",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 120,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 77,
+        "object.path": "alsa:acp:Generic:6:playback:monitor_0",
+        "port.alias": "ALC887-VD Digital:monitor_FL",
+        "port.id": 0,
+        "port.monitor": true,
+        "port.name": "monitor_FL"
+      }
+    }
+  },
+  {
+    "id": 121,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 77,
+        "object.path": "alsa:acp:Generic:6:playback:monitor_1",
+        "port.alias": "ALC887-VD Digital:monitor_FR",
+        "port.id": 1,
+        "port.monitor": true,
+        "port.name": "monitor_FR"
+      }
+    }
+  },
+  {
+    "id": 122,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FL",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 78,
+        "object.path": "alsa:acp:Generic:0:capture:capture_0",
+        "port.alias": "ALC887-VD Analog:capture_FL",
+        "port.id": 0,
+        "port.name": "capture_FL",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 123,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "audio.channel": "FR",
+        "format.dsp": "32 bit float mono audio",
+        "node.id": 78,
+        "object.path": "alsa:acp:Generic:0:capture:capture_1",
+        "port.alias": "ALC887-VD Analog:capture_FR",
+        "port.id": 1,
+        "port.name": "capture_FR",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 124,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 62,
+      "output-port-id": 85,
+      "input-node-id": 74,
+      "input-port-id": 108,
+      "state": "paused"
+    }
+  },
+  {
+    "id": 125,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 62,
+      "output-port-id": 86,
+      "input-node-id": 74,
+      "input-port-id": 109,
+      "state": "paused"
+    }
+  },
+  {
+    "id": 126,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 65,
+      "output-port-id": 91,
+      "input-node-id": 74,
+      "input-port-id": 106,
+      "state": "paused"
+    }
+  },
+  {
+    "id": 127,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 65,
+      "output-port-id": 92,
+      "input-node-id": 74,
+      "input-port-id": 107,
+      "state": "paused"
+    }
+  },
+  {
+    "id": 128,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 75,
+      "output-port-id": 116,
+      "input-node-id": 69,
+      "input-port-id": 100,
+      "state": "paused"
+    }
+  },
+  {
+    "id": 129,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 75,
+      "output-port-id": 117,
+      "input-node-id": 69,
+      "input-port-id": 101,
+      "state": "paused"
+    }
+  },
+  {
+    "id": 130,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 75,
+      "output-port-id": 114,
+      "input-node-id": 72,
+      "input-port-id": 104,
+      "state": "paused"
+    }
+  },
+  {
+    "id": 131,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "device.api": "v4l2",
+        "media.class": "Video/Source",
+        "node.description": "USB Video (V4L2)",
+        "node.name": "v4l2_input.pci-0000_02_00.0-usb-0_1_1.0",
+        "node.nick": "USB Video",
+        "object.path": "v4l2:/dev/video0"
+      }
+    }
+  },
+  {
+    "id": 132,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "node.id": 131,
+        "object.path": "v4l2:/dev/video0:capture_0",
+        "port.alias": "USB Video:capture_1",
+        "port.id": 0,
+        "port.name": "capture_1",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 154,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_128:playback_0",
+        "port.alias": "WORLDE:WORLDE MIDI 1",
+        "port.id": 1,
+        "port.name": "WORLDE: MIDI 1 (playback)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 151,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_128:capture_0",
+        "port.alias": "WORLDE:WORLDE MIDI 1",
+        "port.id": 1,
+        "port.name": "WORLDE: MIDI 1 (capture)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 159,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_129:playback_0",
+        "port.alias": "Clipper:Clipper MIDI 1",
+        "port.id": 2,
+        "port.name": "Clipper: MIDI 1 (playback)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 157,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_129:capture_0",
+        "port.alias": "Clipper:Clipper MIDI 1",
+        "port.id": 2,
+        "port.name": "Clipper: MIDI 1 (capture)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 146,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_129:playback_1",
+        "port.alias": "Clipper:Clipper MIDI 2",
+        "port.id": 3,
+        "port.name": "Clipper: MIDI 2 (playback)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 156,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_129:capture_1",
+        "port.alias": "Clipper:Clipper MIDI 2",
+        "port.id": 3,
+        "port.name": "Clipper: MIDI 2 (capture)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 158,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "input",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_130:playback_0",
+        "port.alias": "Keys -n- Pads:Keys MIDI 1",
+        "port.id": 4,
+        "port.name": "Keys -n- Pads:Keys MIDI 1 (playback)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 142,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_130:capture_0",
+        "port.alias": "Keys -n- Pads:Keys MIDI 1",
+        "port.id": 4,
+        "port.name": "Keys -n- Pads:Keys MIDI 1 (capture)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 160,
+    "type": "PipeWire:Interface:Port",
+    "info": {
+      "direction": "output",
+      "props": {
+        "format.dsp": "8 bit raw midi",
+        "node.id": 53,
+        "object.path": "alsa:seq:default:client_130:capture_1",
+        "port.alias": "Keys -n- Pads:Keys Sync",
+        "port.id": 5,
+        "port.name": "Keys -n- Pads:Keys Sync (capture)",
+        "port.physical": true,
+        "port.terminal": true
+      }
+    }
+  },
+  {
+    "id": 144,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 58,
+      "output-port-id": 60,
+      "input-node-id": 53,
+      "input-port-id": 154,
+      "state": "active"
+    }
+  },
+  {
+    "id": 147,
+    "type": "PipeWire:Interface:Link",
+    "info": {
+      "output-node-id": 53,
+      "output-port-id": 157,
+      "input-node-id": 58,
+      "input-port-id": 59,
+      "state": "active"
+    }
+  }
+]
