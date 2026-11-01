@@ -1,6 +1,6 @@
 .{
     .name = .aroute,
-    .version = "0.0.2",
+    .version = "0.0.3",
     .fingerprint = 0xb68caa383f4c87c0, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},

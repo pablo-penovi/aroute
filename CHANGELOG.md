@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-11-01
+
+### Added
+
+- Split devices (UCM `*.split` loopbacks, e.g. "MiniFuse 1 Main Output L/R"): a split Source reads straight from the hardware Ports behind it, a split sink keeps its own Ports, and Links to those hardware Ports show under the split Endpoint. Links to or from the `.split` loopback itself are not shown.
+- Monitor ports of `Audio/Source/Virtual` nodes (null sinks such as "Renoise Virtual") are that node's Source Endpoint.
+- Every other Port (raw hardware, other monitors) is in a hidden Endpoint labelled `<node> · <stem>` or `<node> · monitor`, marked `(hidden)` in `--list`, so existing Links to it still show as Connections.
+
 ## [0.0.2] - 2026-11-01
 
 ### Added

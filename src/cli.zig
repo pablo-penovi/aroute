@@ -51,14 +51,23 @@ test "list: real machine with streams, with aliases, without the ALSA scan" {
         \\  3    to    midi  pw   BLE MIDI 1  [53]
         \\  4    to    audio pw   MiniFuse 1 Loopback L/R  [81 82]
         \\  5    to    audio pw   Speakers  [87 88]
-        \\  6    from  audio pw   MiniFuse 1 Loopback L/R  [91 92]
-        \\  7    from  audio pw   MiniFuse 1 Mic/Line/Inst 1 (L)  [97]
+        \\  6    from  audio pw   MiniFuse 1 Loopback L/R  [110 111]
+        \\  7    from  audio pw   MiniFuse 1 Mic/Line/Inst 1 (L)  [108]
         \\  8    to    audio pw   Starship/Matisse HD Audio Controller Digital Stereo (IEC958)  [112 113]
         \\  9    from  audio pw   Starship/Matisse HD Audio Controller Analog Stereo  [116 117]
         \\  10   to    audio pw   rec  [131]
-        \\  11   to    audio pw   Renoise Virtual  [158 147]
-        \\  12   to    audio pw   mono  [133 161]
-        \\  13   from  audio pw   play  [135 138]
+        \\  11   from  audio pw   Renoise Virtual  [156 155]
+        \\  12   to    audio pw   Renoise Virtual  [158 147]
+        \\  13   to    audio pw   mono  [133 161]
+        \\  14   from  audio pw   play  [135 138]
+        \\  15   from  audio pw   Navi 21/23 HDMI/DP Audio Controller Digital Stereo (HDMI 3) [LS32AG32x] · monitor  [76 75] (hidden)
+        \\  16   from  audio pw   MiniFuse 1 Loopback L/R · monitor  [83 84] (hidden)
+        \\  17   from  audio pw   Speakers · monitor  [89 90] (hidden)
+        \\  18   from  audio pw   MiniFuse 1 0 · monitor  [104 105 106 107] (hidden)
+        \\  19   from  audio pw   MiniFuse 1 0 · capture  [109] (hidden)
+        \\  20   from  audio pw   Starship/Matisse HD Audio Controller Digital Stereo (IEC958) · monitor  [114 115] (hidden)
+        \\  21   from  audio pw   rec · monitor  [151] (hidden)
+        \\  22   from  audio pw   mono · monitor  [146 130] (hidden)
         \\CONNECTIONS
         \\  MiniFuse 1 Mic/Line/Inst 1 (L) → rec
         \\  USB Video Analog Stereo → mono
@@ -78,8 +87,7 @@ test "list: real machine with ALSA MIDI and BLE MIDI" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // Matches the script's --list on the same captures, apart from the audio
-    // special cases (split devices, hidden Endpoints) and the snapshot indent.
+    // Matches the script's --list on the same captures, apart from the snapshot indent.
     const midi = try alsa.parse(arena, .{
         .sources = @embedFile("testdata/aconnect-i.txt"),
         .destinations = @embedFile("testdata/aconnect-o.txt"),
@@ -102,17 +110,24 @@ test "list: real machine with ALSA MIDI and BLE MIDI" {
         \\  8    to    midi  alsa Clipper MIDI 1  [129:0 bridge=159]
         \\  9    to    midi  alsa Clipper MIDI 2  [129:1 bridge=146]
         \\  10   to    midi  alsa Keys 'n' Pads  [130:0 bridge=158]
-        \\  11   to    audio pw   Renoise Virtual  [44 45]
-        \\  12   from  audio pw   USB Video Analog Stereo  [79 80]
-        \\  13   to    audio pw   Navi 21/23 HDMI/DP Audio Controller Digital Stereo (HDMI 3) [LS32AG32x]  [81 82]
-        \\  14   from  midi  pw   BLE MIDI 1  [60]
-        \\  15   to    midi  pw   BLE MIDI 1  [59]
-        \\  16   to    audio pw   MiniFuse 1 Loopback L/R  [87 88]
-        \\  17   to    audio pw   MiniFuse 1 Main Output L/R  [93 94]
-        \\  18   from  audio pw   MiniFuse 1 Loopback L/R  [97 98]
-        \\  19   from  audio pw   MiniFuse 1 Mic/Line/Inst 1 (L)  [99]
-        \\  20   to    audio pw   Starship/Matisse HD Audio Controller Digital Stereo (IEC958)  [118 119]
-        \\  21   from  audio pw   Starship/Matisse HD Audio Controller Analog Stereo  [122 123]
+        \\  11   from  audio pw   Renoise Virtual  [46 47]
+        \\  12   to    audio pw   Renoise Virtual  [44 45]
+        \\  13   from  audio pw   USB Video Analog Stereo  [79 80]
+        \\  14   to    audio pw   Navi 21/23 HDMI/DP Audio Controller Digital Stereo (HDMI 3) [LS32AG32x]  [81 82]
+        \\  15   from  midi  pw   BLE MIDI 1  [60]
+        \\  16   to    midi  pw   BLE MIDI 1  [59]
+        \\  17   to    audio pw   MiniFuse 1 Loopback L/R  [87 88]
+        \\  18   to    audio pw   MiniFuse 1 Main Output L/R  [93 94]
+        \\  19   from  audio pw   MiniFuse 1 Loopback L/R  [116 117]
+        \\  20   from  audio pw   MiniFuse 1 Mic/Line/Inst 1 (L)  [114]
+        \\  21   to    audio pw   Starship/Matisse HD Audio Controller Digital Stereo (IEC958)  [118 119]
+        \\  22   from  audio pw   Starship/Matisse HD Audio Controller Analog Stereo  [122 123]
+        \\  23   from  audio pw   Navi 21/23 HDMI/DP Audio Controller Digital Stereo (HDMI 3) [LS32AG32x] · monitor  [83 84] (hidden)
+        \\  24   from  audio pw   MiniFuse 1 Loopback L/R · monitor  [89 90] (hidden)
+        \\  25   from  audio pw   MiniFuse 1 Main Output L/R · monitor  [95 96] (hidden)
+        \\  26   from  audio pw   MiniFuse 1 0 · monitor  [110 111 112 113] (hidden)
+        \\  27   from  audio pw   MiniFuse 1 0 · capture  [115] (hidden)
+        \\  28   from  audio pw   Starship/Matisse HD Audio Controller Digital Stereo (IEC958) · monitor  [120 121] (hidden)
         \\CONNECTIONS
         \\  BLE MIDI 1 → WORLDE
         \\  Clipper MIDI 1 → BLE MIDI 1
