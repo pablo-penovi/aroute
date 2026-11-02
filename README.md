@@ -21,7 +21,7 @@ aroute --load NAME [--force]
 aroute --help           print this usage and more on profiles and aliases
 ```
 
-In the TUI, items are picked with a letter. When a list doesn't fit, `PgUp`/`PgDn` page through it and `/` searches it.
+In the TUI, items are picked with a letter. When a list doesn't fit, `PgUp`/`PgDn` page through it and `/` searches it. The home screen updates as soon as a device or connection comes or goes, wherever the change was made.
 
 ## Files
 

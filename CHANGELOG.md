@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
+### Changed
+
+- The TUI's home screen updates as soon as the graph changes, instead of re-reading it every second, and uses no CPU while the graph is still (ADR 0004). A Connection made or undone elsewhere, or a Device plugged in or out, shows at once. While picking or answering a prompt the screen stays frozen as before; going back home shows what changed meanwhile at once. While `pw-dump` is down, the TUI still tries to start it again once a second.
+- To hear of ALSA changes, aroute's sequencer client has one Port, `announce`, while the TUI runs. It only receives the sequencer's announcements: nothing can be connected to it, and it isn't shown as a Device, by aroute or through PipeWire's Midi-Bridge.
+
 ## [0.1.3] - 2026-11-02
 
 ### Changed
