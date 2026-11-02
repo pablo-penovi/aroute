@@ -1,5 +1,5 @@
 //! The interactive TUI, as the script's `tui`: the home screen, re-read
-//! every second, and Connect. Drawing is in `screen.zig`, the terminal in
+//! every second, Connect and Disconnect. Drawing is in `screen.zig`, the terminal in
 //! `term.zig`.
 
 const std = @import("std");
@@ -62,6 +62,8 @@ pub const App = struct {
     pub const Mode = union(enum) {
         home,
         connect: Picking,
+        /// Picking a Connection to undo; the list's page.
+        disconnect: usize,
     };
 
     /// Where Connect is at. The graph is not re-read meanwhile, so the
@@ -167,23 +169,37 @@ pub const App = struct {
         };
     }
 
+    /// The Disconnect screen. Only while picking.
+    pub fn disconnectScreen(app: App) screen.Disconnect {
+        return .{
+            .graph = app.current.graph,
+            .profile = app.profile,
+            .modified = app.modified(),
+            .status = app.status(),
+            .page = app.mode.disconnect,
+        };
+    }
+
     /// The screen of `size`, one string per row.
     pub fn rows(app: App, arena: Allocator, size: screen.Size) screen.Error![]const []const u8 {
         return switch (app.mode) {
             .home => screen.home(arena, app.home(), size),
             .connect => screen.connect(arena, try app.connectScreen(arena), size),
+            .disconnect => screen.disconnect(arena, app.disconnectScreen(), size),
         };
     }
 
     pub const Action = enum { stay, quit };
 
-    /// Handles a key on a screen of `size`. `scanner` re-reads the graph
-    /// and `wiring.connect(arena, ends)` makes a Link, returning why it
-    /// failed (or null), as `run` takes them.
+    /// Handles a key on a screen of `size`. `scanner` re-reads the graph,
+    /// `wiring.connect(arena, ends)` makes a Link, returning why it failed
+    /// (or null), and `wiring.disconnect(arena, ends)` undoes one, returning
+    /// whether it did, as `run` takes them.
     pub fn key(app: *App, arena: Allocator, k: term.Key, size: screen.Size, scanner: anytype, wiring: anytype) !Action {
         switch (app.mode) {
             .home => return app.homeKey(arena, k, size),
             .connect => try app.connectKey(arena, k, size, scanner, wiring),
+            .disconnect => try app.disconnectKey(arena, k, size, scanner, wiring),
         }
         return .stay;
     }
@@ -204,7 +220,11 @@ pub const App = struct {
                     app.status_text.clearRetainingCapacity();
                     app.mode = .{ .connect = .{} };
                 },
-                '2'...'5' => try app.say(false, "{s}", .{not_yet[c - '2']}),
+                '2' => {
+                    app.status_text.clearRetainingCapacity();
+                    app.mode = .{ .disconnect = 0 };
+                },
+                '3'...'5' => try app.say(false, "{s}", .{not_yet[c - '3']}),
                 else => {},
             },
             else => {},
@@ -213,7 +233,6 @@ pub const App = struct {
     }
 
     const not_yet = [_][]const u8{
-        "Disconnect is not implemented yet",
         "Save profile is not implemented yet",
         "Load profile is not implemented yet",
         "Delete profile is not implemented yet",
@@ -301,6 +320,58 @@ pub const App = struct {
         // Show the new Connection now, as the script does.
         try app.refresh(scanner);
     }
+
+    fn disconnectKey(app: *App, arena: Allocator, k: term.Key, size: screen.Size, scanner: anytype, wiring: anytype) !void {
+        const page = &app.mode.disconnect;
+        const pages: picker.Pages = .init(app.current.graph.connections.len, screen.disconnectRows(size));
+        switch (k) {
+            .esc => app.mode = .home,
+            .page_down => page.* = pages.next(page.*),
+            .page_up => page.* = pages.prev(page.*),
+            .char => |c| {
+                const i = pages.pick(page.*, c) orelse return;
+                app.mode = .home;
+                try app.disconnectPicked(arena, i, scanner, wiring);
+            },
+            else => {},
+        }
+    }
+
+    /// Re-reads the graph and, if the Connection is still there, undoes
+    /// every Link it has now.
+    fn disconnectPicked(app: *App, arena: Allocator, i: usize, scanner: anytype, wiring: anytype) !void {
+        const old = app.current.graph;
+        const c = old.connections[i];
+        const from = old.endpoints[c.from];
+        const to = old.endpoints[c.to];
+        const fresh = Scan.read(app.gpa, scanner) catch |err| switch (err) {
+            error.Unreadable => {
+                app.unreadable = true;
+                return;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const still = connect.findConnection(fresh.graph, from, to) orelse {
+            // The labels are in the old graph, which goes once the status is said.
+            defer app.replace(fresh);
+            return app.say(true, "✗ {s} → {s} is gone", .{ from.label, to.label });
+        };
+        app.replace(fresh);
+
+        var all = true;
+        for (still.links) |l| {
+            if (!try wiring.disconnect(arena, l.ends)) all = false;
+        }
+        const g = app.current.graph;
+        const labels = .{ g.endpoints[still.from].label, g.endpoints[still.to].label };
+        if (all) {
+            try app.say(false, "✓ Disconnected {s} → {s}", labels);
+        } else {
+            try app.say(true, "✗ could not fully disconnect {s} → {s}", labels);
+        }
+        // Show it gone now, as the script does.
+        try app.refresh(scanner);
+    }
 };
 
 fn other(d: graph.Direction) graph.Direction {
@@ -310,7 +381,8 @@ fn other(d: graph.Direction) graph.Direction {
 /// Runs the TUI until Esc. `scanner.scan(arena)` reads the graph; the first
 /// read happens before the screen is taken over, so its error is the
 /// caller's. `wiring.connect(arena, ends)` makes a Link and returns null, or
-/// why it could not, allocated in `arena`.
+/// why it could not, allocated in `arena`; `wiring.disconnect(arena, ends)`
+/// undoes one and returns whether it did.
 pub fn run(gpa: Allocator, io: Io, scanner: anytype, wiring: anytype) !void {
     var app: App = try .init(gpa, scanner);
     defer app.deinit();
@@ -443,7 +515,7 @@ test "App: the first read failing is an error" {
     try testing.expectError(error.Unreadable, App.init(testing.allocator, FakeScanner{ .graphs = &.{null}, .next = &n }));
 }
 
-test "App: Esc quits, PgUp/PgDn scroll, the other menu keys are not there yet" {
+test "App: Esc quits, PgUp/PgDn scroll, the Profile keys are not there yet" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -472,8 +544,8 @@ test "App: Esc quits, PgUp/PgDn scroll, the other menu keys are not there yet" {
     for (0..10) |_| _ = try app.key(arena, .page_down, size, scanner, wiring);
     try testing.expectEqual(screen.maxScroll(24, 6), app.scroll);
 
-    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '2' }, size, scanner, wiring));
-    try testing.expectEqualStrings("Disconnect is not implemented yet", app.home().status.text);
+    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '3' }, size, scanner, wiring));
+    try testing.expectEqualStrings("Save profile is not implemented yet", app.home().status.text);
     try testing.expectEqual(.stay, try app.key(arena, .{ .char = '5' }, size, scanner, wiring));
     try testing.expectEqualStrings("Delete profile is not implemented yet", app.home().status.text);
     try testing.expectEqual(.stay, try app.key(arena, .{ .char = 'a' }, size, scanner, wiring));
@@ -481,15 +553,23 @@ test "App: Esc quits, PgUp/PgDn scroll, the other menu keys are not there yet" {
     try testing.expectEqual(.quit, try app.key(arena, .esc, size, scanner, wiring));
 }
 
-/// Records the Links it is asked to make; fails those in `fail`.
+/// Records the Links it is asked to make or undo; fails those in `fail`.
 const FakeWiring = struct {
     made: *std.ArrayList(graph.Ends),
+    /// Where undone Links go; none may be undone if not given.
+    undone: ?*std.ArrayList(graph.Ends) = null,
     fail: []const graph.Ends = &.{},
 
     pub fn connect(w: FakeWiring, arena: Allocator, e: graph.Ends) Allocator.Error!?[]const u8 {
         for (w.fail) |f| if (std.meta.eql(f, e)) return "failed to link ports: No such file or directory";
         try w.made.append(arena, e);
         return null;
+    }
+
+    pub fn disconnect(w: FakeWiring, arena: Allocator, e: graph.Ends) Allocator.Error!bool {
+        for (w.fail) |f| if (std.meta.eql(f, e)) return false;
+        try w.undone.?.append(arena, e);
+        return true;
     }
 };
 
@@ -776,4 +856,205 @@ fn connectAndFail(gpa: Allocator, gone: bool) !void {
 test "Connect: running out of memory leaks nothing" {
     try testing.checkAllAllocationFailures(testing.allocator, connectAndFail, .{false});
     try testing.checkAllAllocationFailures(testing.allocator, connectAndFail, .{true});
+}
+
+/// Synth to Speakers, now with a third Link to Speakers' left channel.
+const studio_more_links: graph.Graph = .{ .endpoints = &studio_shuffled_eps, .connections = &.{.{ .from = 3, .to = 2, .links = &(synth_speakers ++ [_]graph.Link{
+    .{ .ends = .{ .pw = .{ 3, 4 } }, .from_name = "pw:synth:out_FR", .to_name = "pw:speakers:in_FL" },
+}) }} };
+
+/// Synth is still there, but no longer connected.
+const studio_unlinked: graph.Graph = .{ .endpoints = &studio_eps, .connections = &.{} };
+
+test "Disconnect: the Connections with letters; picking one undoes all its Links now" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_more_links, studio_unlinked }, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    try app.say(false, "✓ earlier", .{});
+    _ = try app.key(arena, .{ .char = '2' }, big, scanner, wiring);
+    try testing.expect(!app.live());
+    try testing.expectEqualStrings("", app.status().text);
+    const p = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, p[3], "Synth") != null);
+    // Not a letter on screen.
+    _ = try app.key(arena, .{ .char = 'b' }, big, scanner, wiring);
+    try testing.expect(!app.live());
+    try testing.expectEqual(1, n);
+
+    // The graph is re-read first: the same Connection, at other indexes,
+    // with a Link more by now.
+    _ = try app.key(arena, .{ .char = 'a' }, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualDeep(&[_]graph.Ends{ .{ .pw = .{ 2, 4 } }, .{ .pw = .{ 3, 5 } }, .{ .pw = .{ 3, 4 } } }, undone.items);
+    try testing.expectEqualStrings("✓ Disconnected Synth → Speakers", app.home().status.text);
+    try testing.expect(!app.home().status.err);
+    // Re-read again, to show it gone.
+    try testing.expectEqual(3, n);
+    try testing.expectEqual(0, app.home().graph.connections.len);
+    try testing.expectEqual(0, made.items.len);
+}
+
+test "Disconnect: a Connection that is gone by the time it is undone" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+
+    // Synth unplugged, or still there but no longer connected.
+    for ([_]graph.Graph{ studio_without_synth, studio_unlinked }) |fresh| {
+        var n: usize = 0;
+        const scanner: FakeScanner = .{ .graphs = &.{ studio, fresh }, .next = &n };
+        var app: App = try .init(testing.allocator, scanner);
+        defer app.deinit();
+        for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+        try testing.expectEqualStrings("✗ Synth → Speakers is gone", app.home().status.text);
+        try testing.expect(app.home().status.err);
+        try testing.expect(app.live());
+        // What is shown is the fresh graph.
+        try testing.expectEqual(fresh.endpoints.len, app.home().graph.endpoints.len);
+        try testing.expectEqual(2, n);
+    }
+    try testing.expectEqual(0, undone.items.len);
+}
+
+test "Disconnect: a Link the tool can't undo" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone, .fail = &.{.{ .pw = .{ 2, 4 } }} };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings("✗ could not fully disconnect Synth → Speakers", app.home().status.text);
+    try testing.expect(app.home().status.err);
+    // The other Link is still undone.
+    try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 3, 5 } }}, undone.items);
+}
+
+test "Disconnect: the graph can't be re-read" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, null }, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings(unreadable, app.home().status.text);
+    try testing.expect(app.live());
+    try testing.expectEqual(0, undone.items.len);
+}
+
+test "Disconnect: Esc goes back; nothing to pick with no Connections" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio_unlinked}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    _ = try app.key(arena, .{ .char = '2' }, big, scanner, wiring);
+    for ([_]term.Key{ .{ .char = 'a' }, .page_down, .page_up, .tab, .enter }) |k| {
+        try testing.expectEqual(.stay, try app.key(arena, k, big, scanner, wiring));
+        try testing.expectEqual(App.Mode{ .disconnect = 0 }, app.mode);
+    }
+    try testing.expectEqual(.stay, try app.key(arena, .esc, big, scanner, wiring));
+    try testing.expect(app.live());
+    try testing.expectEqual(1, n);
+}
+
+test "Disconnect: PgUp/PgDn page the Connections, letters from `a` on each page" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // 28 Sources, each connected to Speakers; and a hidden monitor connected
+    // to Speakers too, last: 29 Connections, 8 pages of 4.
+    var eps: [30]graph.Endpoint = undefined;
+    var conns: [29]graph.Connection = undefined;
+    for (eps[0..28], conns[0..28], 0..) |*ep, *c, i| {
+        ep.* = pwEp(try std.fmt.allocPrint(arena, "Source {d}", .{i}), .audio, .from, try arena.dupe(u32, &.{@intCast(i)}));
+        const links = try arena.dupe(graph.Link, &.{.{ .ends = .{ .pw = .{ @intCast(i), 100 } }, .from_name = "", .to_name = "" }});
+        c.* = .{ .from = i, .to = 29, .links = links };
+    }
+    eps[28] = pwEp("Speakers · monitor", .audio, .from, &.{101});
+    eps[28].hidden = true;
+    eps[29] = pwEp("Speakers", .audio, .to, &.{100});
+    conns[28] = .{ .from = 28, .to = 29, .links = &.{.{ .ends = .{ .pw = .{ 101, 100 } }, .from_name = "", .to_name = "" }} };
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &conns }}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    // 10 rows: 5 for the body, 4 for the Connections.
+    const small: screen.Size = .{ .rows = 10, .cols = 60 };
+    try testing.expectEqual(4, screen.disconnectRows(small));
+    _ = try app.key(arena, .{ .char = '2' }, small, scanner, wiring);
+    _ = try app.key(arena, .page_up, small, scanner, wiring);
+    try testing.expectEqual(App.Mode{ .disconnect = 0 }, app.mode);
+    for (0..2) |_| _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try testing.expectEqual(App.Mode{ .disconnect = 2 }, app.mode);
+    _ = try app.key(arena, .page_up, small, scanner, wiring);
+    try testing.expectEqual(App.Mode{ .disconnect = 1 }, app.mode);
+    // Only 4 letters on screen.
+    _ = try app.key(arena, .{ .char = 'e' }, small, scanner, wiring);
+    try testing.expectEqual(App.Mode{ .disconnect = 1 }, app.mode);
+    _ = try app.key(arena, .{ .char = 'c' }, small, scanner, wiring);
+    try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 6, 100 } }}, undone.items);
+    try testing.expectEqualStrings("✓ Disconnected Source 6 → Speakers", app.home().status.text);
+
+    // The last page; past it, nothing changes. Its only row is the monitor.
+    // (The fake graph is the same on every read.)
+    _ = try app.key(arena, .{ .char = '2' }, small, scanner, wiring);
+    for (0..20) |_| _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try testing.expectEqual(App.Mode{ .disconnect = 7 }, app.mode);
+    _ = try app.key(arena, .{ .char = 'b' }, small, scanner, wiring);
+    try testing.expect(!app.live());
+    _ = try app.key(arena, .{ .char = 'a' }, small, scanner, wiring);
+    try testing.expectEqualDeep(&[_]graph.Ends{ .{ .pw = .{ 6, 100 } }, .{ .pw = .{ 101, 100 } } }, undone.items[0..2]);
+    try testing.expectEqualStrings("✓ Disconnected Speakers · monitor → Speakers", app.home().status.text);
+}
+
+fn disconnectAndFail(gpa: Allocator, fresh: graph.Graph) !void {
+    // The frame arena runs out of memory too.
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, fresh }, .next = &n };
+    var app: App = try .init(gpa, scanner);
+    defer app.deinit();
+    for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, FakeWiring{ .made = &made, .undone = &undone });
+}
+
+test "Disconnect: running out of memory leaks nothing" {
+    try testing.checkAllAllocationFailures(testing.allocator, disconnectAndFail, .{studio_more_links});
+    try testing.checkAllAllocationFailures(testing.allocator, disconnectAndFail, .{studio_unlinked});
 }

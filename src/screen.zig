@@ -365,6 +365,48 @@ fn connectMenu(arena: Allocator, c: Connect, paged: bool) Error![]const u8 {
     return out.toOwnedSlice();
 }
 
+/// Picking a Connection to undo: the CONNECTIONS list with letters, in
+/// place of the columns, as in the script.
+pub const Disconnect = struct {
+    graph: graph.Graph,
+    profile: []const u8,
+    modified: bool,
+    status: Status = .{},
+    /// The list's page.
+    page: usize = 0,
+};
+
+/// Rows the Connections get on the Disconnect screen: the body less the header.
+pub fn disconnectRows(size: Size) usize {
+    return bodyRows(size) -| 1;
+}
+
+/// The Disconnect screen, one string per row.
+pub fn disconnect(arena: Allocator, d: Disconnect, size: Size) Error![]const []const u8 {
+    const g = d.graph;
+    const pages: picker.Pages = .init(g.connections.len, disconnectRows(size));
+    var lines: std.ArrayList([]const u8) = .empty;
+    try lines.append(arena, if (pages.count() > 1)
+        try std.fmt.allocPrint(arena, style.bold ++ "  CONNECTIONS  {d}/{d}" ++ style.off, .{ pages.clamp(d.page) + 1, pages.count() })
+    else
+        style.bold ++ "  CONNECTIONS" ++ style.off);
+    if (g.connections.len == 0) try lines.append(arena, dimLine("(no connections)"));
+    const shown = pages.slice(d.page);
+    for (g.connections[shown.start..][0..shown.len], 0..) |c, i| {
+        try lines.append(arena, try connectionLine(arena, g, c, size.cols, picker.letter(i)));
+    }
+    return frame(arena, .{
+        .title = try title(arena, d.profile, d.modified, size.cols),
+        .body = lines.items,
+        .scroll = 0,
+        .menu = if (pages.count() > 1)
+            "Disconnect: pick a connection   " ++ style.bold ++ "PgUp/PgDn" ++ style.off ++ " Page   " ++ style.bold ++ "Esc" ++ style.off ++ " Back"
+        else
+            "Disconnect: pick a connection   " ++ style.bold ++ "Esc" ++ style.off ++ " Back",
+        .status = d.status,
+    }, size);
+}
+
 /// Width of each of the two columns, with ` │ ` between them.
 pub fn columnWidth(cols: usize) usize {
     return (cols -| 3) / 2;
@@ -435,25 +477,35 @@ fn connections(arena: Allocator, g: graph.Graph, cols: usize) Error![]const []co
     var lines: std.ArrayList([]const u8) = .empty;
     try lines.append(arena, style.bold ++ "  CONNECTIONS" ++ style.off);
     if (g.connections.len == 0) try lines.append(arena, dimLine("(no connections)"));
+    for (g.connections) |c| try lines.append(arena, try connectionLine(arena, g, c, cols, null));
+    return lines.items;
+}
+
+/// `  ● source → destination`, coloured by the Source's Kind; with a letter,
+/// `x ● …`, the letter in bold cyan.
+fn connectionLine(arena: Allocator, g: graph.Graph, c: graph.Connection, cols: usize, letter: ?u8) Error![]const u8 {
     // As in the script: the Source padded to `w`, the Destination cut to it.
     const w = (cols -| 10) / 2;
-    for (g.connections) |c| {
-        const col = style.kind(g.endpoints[c.from].kind);
-        var from: Writer.Allocating = .init(arena);
-        try text.fit(&from.writer, g.endpoints[c.from].label, w);
-        var out: Writer.Allocating = .init(arena);
-        var l: text.Line = .init(&out.writer, cols);
+    const col = style.kind(g.endpoints[c.from].kind);
+    var from: Writer.Allocating = .init(arena);
+    try text.fit(&from.writer, g.endpoints[c.from].label, w);
+    var out: Writer.Allocating = .init(arena);
+    var l: text.Line = .init(&out.writer, cols);
+    if (letter) |x| {
+        try l.text(style.bold ++ style.cyan);
+        try l.text(&.{x});
+        try l.text(style.off ++ " ");
+    } else {
         try l.text("  ");
-        try l.text(col);
-        try l.text("● ");
-        try l.text(from.written());
-        try l.text(style.off ++ " → ");
-        try l.text(col);
-        try l.text(try cut(arena, g.endpoints[c.to].label, w));
-        try l.text(style.off);
-        try lines.append(arena, try out.toOwnedSlice());
     }
-    return lines.items;
+    try l.text(col);
+    try l.text("● ");
+    try l.text(from.written());
+    try l.text(style.off ++ " → ");
+    try l.text(col);
+    try l.text(try cut(arena, g.endpoints[c.to].label, w));
+    try l.text(style.off);
+    return out.toOwnedSlice();
 }
 
 const testing = std.testing;
@@ -849,5 +901,81 @@ test "connect: one connection; a tiny terminal shows what fits" {
         const rows = try connectRows(arena, c, size);
         try testing.expectEqual(size.rows, rows.len);
         for (rows) |r| try testing.expect(text.width(r) <= size.cols);
+    }
+}
+
+test "disconnect: the Connections with letters, in place of the columns" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const d: Disconnect = .{ .graph = fixture, .profile = "default", .modified = true, .status = .{ .text = "✓ earlier" } };
+    const rows = try disconnect(arena, d, .{ .rows = 12, .cols = 50 });
+    try expectRows(&.{
+        "aroute  profile: default (modified)   ● audio  ● …",
+        try dashes(arena, 50),
+        "  CONNECTIONS",
+        "a ● USB Video Analog St… → Speakers",
+        "b ● WORLDE               → 日本語のスピーカー",
+        "c ● Speakers · monitor   → Clipper MIDI 2",
+        "",
+        "",
+        "",
+        try dashes(arena, 50),
+        "Disconnect: pick a connection   Esc Back",
+        "✓ earlier",
+    }, try plainRows(arena, rows));
+    try testing.expect(std.mem.startsWith(u8, rows[3], style.bold ++ style.cyan ++ "a" ++ style.off ++ " " ++ style.audio ++ "● USB"));
+    try testing.expect(std.mem.startsWith(u8, rows[4], style.bold ++ style.cyan ++ "b" ++ style.off ++ " " ++ style.midi ++ "● WORLDE"));
+
+    const none: Disconnect = .{ .graph = .{ .endpoints = &.{}, .connections = &.{} }, .profile = "default", .modified = false };
+    const p = try plainRows(arena, try disconnect(arena, none, .{ .rows = 12, .cols = 50 }));
+    try expectRows(&.{ "  CONNECTIONS", "  (no connections)", "" }, p[2..5]);
+}
+
+test "disconnect: more than a page shows which page, letters from `a` on each" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var g = fixture;
+    var conns: [7]graph.Connection = undefined;
+    for (&conns, 0..) |*c, i| c.* = fixture.connections[i % 3];
+    g.connections = &conns;
+    // 3 rows for the Connections.
+    const size: Size = .{ .rows = 9, .cols = 70 };
+    try testing.expectEqual(3, disconnectRows(size));
+
+    var d: Disconnect = .{ .graph = g, .profile = "default", .modified = false, .page = 1 };
+    var p = try plainRows(arena, try disconnect(arena, d, size));
+    try expectRows(&.{
+        "  CONNECTIONS  2/3",
+        "a ● USB Video Analog Stereo        → Speakers",
+        "b ● WORLDE                         → 日本語のスピーカー",
+        "c ● Speakers · monitor             → Clipper MIDI 2",
+        try dashes(arena, 70),
+        "Disconnect: pick a connection   PgUp/PgDn Page   Esc Back",
+    }, p[2..8]);
+
+    // The last page is short; a page past it is the last one.
+    d.page = 9;
+    p = try plainRows(arena, try disconnect(arena, d, size));
+    try expectRows(&.{ "  CONNECTIONS  3/3", "a ● USB Video Analog Stereo        → Speakers", "", "" }, p[2..6]);
+}
+
+test "disconnect: a tiny terminal shows what fits" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    for ([_]Size{
+        .{ .rows = 0, .cols = 0 },  .{ .rows = 1, .cols = 1 }, .{ .rows = 3, .cols = 5 },  .{ .rows = 6, .cols = 2 },
+        .{ .rows = 7, .cols = 12 }, .{ .rows = 8, .cols = 3 }, .{ .rows = 9, .cols = 20 }, .{ .rows = 10, .cols = 4 },
+    }) |size| {
+        for ([_]usize{ 0, 1, 5 }) |page| {
+            const rows = try disconnect(arena, .{ .graph = fixture, .profile = "default", .modified = true, .page = page }, size);
+            try testing.expectEqual(size.rows, rows.len);
+            for (rows) |r| try testing.expect(text.width(r) <= size.cols);
+        }
     }
 }
