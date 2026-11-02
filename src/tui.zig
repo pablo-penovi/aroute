@@ -1,6 +1,6 @@
 //! The interactive TUI, as the script's `tui`: the home screen, re-read
-//! every second, Connect and Disconnect. Drawing is in `screen.zig`, the terminal in
-//! `term.zig`.
+//! every second, Connect and Disconnect, and `/` search in them (`search.zig`).
+//! Drawing is in `screen.zig`, the terminal in `term.zig`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -8,6 +8,7 @@ const Io = std.Io;
 const graph = @import("graph.zig");
 const connect = @import("connect.zig");
 const picker = @import("picker.zig");
+const search = @import("search.zig");
 const screen = @import("screen.zig");
 const term = @import("term.zig");
 
@@ -62,8 +63,7 @@ pub const App = struct {
     pub const Mode = union(enum) {
         home,
         connect: Picking,
-        /// Picking a Connection to undo; the list's page.
-        disconnect: usize,
+        disconnect: Disconnecting,
     };
 
     /// Where Connect is at. The graph is not re-read meanwhile, so the
@@ -76,8 +76,17 @@ pub const App = struct {
         /// The first pick, once there is one; the other column then lists
         /// only what it can be connected to.
         pick: ?usize = null,
-        /// The page the first pick was on, to go back to.
+        /// The page the first pick was on, without the search, to go back to.
         pick_page: usize = 0,
+        /// The focused column's; it goes with the column's focus.
+        search: search.Search = .{},
+    };
+
+    /// Picking a Connection to undo.
+    pub const Disconnecting = struct {
+        /// The list's page.
+        page: usize = 0,
+        search: search.Search = .{},
     };
 
     /// Reads the graph; its snapshot is the baseline of the `default` Profile.
@@ -147,15 +156,9 @@ pub const App = struct {
     pub fn connectScreen(app: App, arena: Allocator) Allocator.Error!screen.Connect {
         const p = app.mode.connect;
         const g = app.current.graph;
-        var from = try screen.column(arena, g, .from);
-        var to = try screen.column(arena, g, .to);
-        const list = if (p.focus == .from) &from else &to;
-        var pickable: std.ArrayList(usize) = .empty;
-        for (list.*) |ep| {
-            const ok = if (p.pick) |first| connect.validEither(g, first, ep) else connect.hasPartner(g, ep);
-            if (ok) try pickable.append(arena, ep);
-        }
-        list.* = pickable.items;
+        const focused_list = try app.pickable(arena, p);
+        const from = if (p.focus == .from) focused_list else try screen.column(arena, g, .from);
+        const to = if (p.focus == .to) focused_list else try screen.column(arena, g, .to);
         return .{
             .graph = g,
             .profile = app.profile,
@@ -166,18 +169,47 @@ pub const App = struct {
             .to = to,
             .page = p.page,
             .pick = p.pick,
+            .search = p.search,
         };
     }
 
+    /// What can be picked in `p`'s focused column, top to bottom: what has
+    /// something to be connected to, or once there is a first pick, what
+    /// it can be connected to; narrowed by `p.search`.
+    fn pickable(app: App, arena: Allocator, p: Picking) Allocator.Error![]const usize {
+        const g = app.current.graph;
+        var list: std.ArrayList(usize) = .empty;
+        for (try screen.column(arena, g, p.focus)) |ep| {
+            const ok = if (p.pick) |first| connect.validEither(g, first, ep) else connect.hasPartner(g, ep);
+            if (ok and search.matches(p.search.query(), &.{g.endpoints[ep].label})) try list.append(arena, ep);
+        }
+        return list.items;
+    }
+
     /// The Disconnect screen. Only while picking.
-    pub fn disconnectScreen(app: App) screen.Disconnect {
+    pub fn disconnectScreen(app: App, arena: Allocator) Allocator.Error!screen.Disconnect {
+        const d = app.mode.disconnect;
         return .{
             .graph = app.current.graph,
             .profile = app.profile,
             .modified = app.modified(),
             .status = app.status(),
-            .page = app.mode.disconnect,
+            .shown = try app.listed(arena),
+            .page = d.page,
+            .search = d.search,
         };
+    }
+
+    /// The Connections listed on the Disconnect screen, as indexes into
+    /// `graph.connections`: those with every word of the search on either side.
+    fn listed(app: App, arena: Allocator) Allocator.Error![]const usize {
+        const g = app.current.graph;
+        const query = app.mode.disconnect.search.query();
+        var list: std.ArrayList(usize) = .empty;
+        for (g.connections, 0..) |c, i| {
+            if (search.matches(query, &.{ g.endpoints[c.from].label, g.endpoints[c.to].label })) try list.append(arena, i);
+        }
+        return list.items;
     }
 
     /// The screen of `size`, one string per row.
@@ -185,7 +217,7 @@ pub const App = struct {
         return switch (app.mode) {
             .home => screen.home(arena, app.home(), size),
             .connect => screen.connect(arena, try app.connectScreen(arena), size),
-            .disconnect => screen.disconnect(arena, app.disconnectScreen(), size),
+            .disconnect => screen.disconnect(arena, try app.disconnectScreen(arena), size),
         };
     }
 
@@ -222,7 +254,7 @@ pub const App = struct {
                 },
                 '2' => {
                     app.status_text.clearRetainingCapacity();
-                    app.mode = .{ .disconnect = 0 };
+                    app.mode = .{ .disconnect = .{} };
                 },
                 '3'...'5' => try app.say(false, "{s}", .{not_yet[c - '3']}),
                 else => {},
@@ -240,6 +272,19 @@ pub const App = struct {
 
     fn connectKey(app: *App, arena: Allocator, k: term.Key, size: screen.Size, scanner: anytype, wiring: anytype) !void {
         const p = &app.mode.connect;
+        switch (p.search.key(k)) {
+            .pass => {},
+            .changed => {
+                p.page = 0;
+                return;
+            },
+            .handled => return,
+            .enter => {
+                const list = try app.focused(arena);
+                if (list.len == 1) try app.pickEndpoint(arena, list[0], size, scanner, wiring);
+                return;
+            },
+        }
         switch (k) {
             .esc => if (p.pick != null) {
                 p.* = .{ .focus = other(p.focus), .page = p.pick_page };
@@ -256,13 +301,7 @@ pub const App = struct {
             .char => |c| {
                 const list = try app.focused(arena);
                 const pages: picker.Pages = .init(list.len, screen.pickRows(size));
-                const ep = list[pages.pick(p.page, c) orelse return];
-                if (p.pick) |first| {
-                    app.mode = .home;
-                    try app.connectPicked(arena, first, ep, scanner, wiring);
-                } else {
-                    p.* = .{ .focus = other(p.focus), .pick = ep, .pick_page = pages.clamp(p.page) };
-                }
+                try app.pickEndpoint(arena, list[pages.pick(p.page, c) orelse return], size, scanner, wiring);
             },
             else => {},
         }
@@ -270,8 +309,24 @@ pub const App = struct {
 
     /// What can be picked in the focused column, top to bottom.
     fn focused(app: App, arena: Allocator) Allocator.Error![]const usize {
-        const c = try app.connectScreen(arena);
-        return if (c.focus == .from) c.from else c.to;
+        return app.pickable(arena, app.mode.connect);
+    }
+
+    /// Picks `ep` in the focused column: the first pick moves on to the
+    /// other column, the second connects them.
+    fn pickEndpoint(app: *App, arena: Allocator, ep: usize, size: screen.Size, scanner: anytype, wiring: anytype) !void {
+        const p = &app.mode.connect;
+        if (p.pick) |first| {
+            app.mode = .home;
+            return app.connectPicked(arena, first, ep, scanner, wiring);
+        }
+        // The search goes with the step, so `Esc` comes back to the page
+        // `ep` is on without it.
+        var all = p.*;
+        all.search = .{};
+        const list = try app.pickable(arena, all);
+        const pages: picker.Pages = .init(list.len, screen.pickRows(size));
+        p.* = .{ .focus = other(p.focus), .pick = ep, .pick_page = pages.pageOf(std.mem.findScalar(usize, list, ep).?) };
     }
 
     /// Re-reads the graph and, if both picks are still there, connects them.
@@ -322,16 +377,33 @@ pub const App = struct {
     }
 
     fn disconnectKey(app: *App, arena: Allocator, k: term.Key, size: screen.Size, scanner: anytype, wiring: anytype) !void {
-        const page = &app.mode.disconnect;
-        const pages: picker.Pages = .init(app.current.graph.connections.len, screen.disconnectRows(size));
+        const d = &app.mode.disconnect;
+        switch (d.search.key(k)) {
+            .pass => {},
+            .changed => {
+                d.page = 0;
+                return;
+            },
+            .handled => return,
+            .enter => {
+                const list = try app.listed(arena);
+                if (list.len == 1) {
+                    app.mode = .home;
+                    try app.disconnectPicked(arena, list[0], scanner, wiring);
+                }
+                return;
+            },
+        }
+        const list = try app.listed(arena);
+        const pages: picker.Pages = .init(list.len, screen.disconnectRows(size));
         switch (k) {
             .esc => app.mode = .home,
-            .page_down => page.* = pages.next(page.*),
-            .page_up => page.* = pages.prev(page.*),
+            .page_down => d.page = pages.next(d.page),
+            .page_up => d.page = pages.prev(d.page),
             .char => |c| {
-                const i = pages.pick(page.*, c) orelse return;
+                const i = pages.pick(d.page, c) orelse return;
                 app.mode = .home;
-                try app.disconnectPicked(arena, i, scanner, wiring);
+                try app.disconnectPicked(arena, list[i], scanner, wiring);
             },
             else => {},
         }
@@ -978,7 +1050,7 @@ test "Disconnect: Esc goes back; nothing to pick with no Connections" {
     _ = try app.key(arena, .{ .char = '2' }, big, scanner, wiring);
     for ([_]term.Key{ .{ .char = 'a' }, .page_down, .page_up, .tab, .enter }) |k| {
         try testing.expectEqual(.stay, try app.key(arena, k, big, scanner, wiring));
-        try testing.expectEqual(App.Mode{ .disconnect = 0 }, app.mode);
+        try testing.expectEqual(App.Mode{ .disconnect = .{} }, app.mode);
     }
     try testing.expectEqual(.stay, try app.key(arena, .esc, big, scanner, wiring));
     try testing.expect(app.live());
@@ -1016,14 +1088,14 @@ test "Disconnect: PgUp/PgDn page the Connections, letters from `a` on each page"
     try testing.expectEqual(4, screen.disconnectRows(small));
     _ = try app.key(arena, .{ .char = '2' }, small, scanner, wiring);
     _ = try app.key(arena, .page_up, small, scanner, wiring);
-    try testing.expectEqual(App.Mode{ .disconnect = 0 }, app.mode);
+    try testing.expectEqual(App.Mode{ .disconnect = .{} }, app.mode);
     for (0..2) |_| _ = try app.key(arena, .page_down, small, scanner, wiring);
-    try testing.expectEqual(App.Mode{ .disconnect = 2 }, app.mode);
+    try testing.expectEqual(App.Mode{ .disconnect = .{ .page = 2 } }, app.mode);
     _ = try app.key(arena, .page_up, small, scanner, wiring);
-    try testing.expectEqual(App.Mode{ .disconnect = 1 }, app.mode);
+    try testing.expectEqual(App.Mode{ .disconnect = .{ .page = 1 } }, app.mode);
     // Only 4 letters on screen.
     _ = try app.key(arena, .{ .char = 'e' }, small, scanner, wiring);
-    try testing.expectEqual(App.Mode{ .disconnect = 1 }, app.mode);
+    try testing.expectEqual(App.Mode{ .disconnect = .{ .page = 1 } }, app.mode);
     _ = try app.key(arena, .{ .char = 'c' }, small, scanner, wiring);
     try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 6, 100 } }}, undone.items);
     try testing.expectEqualStrings("✓ Disconnected Source 6 → Speakers", app.home().status.text);
@@ -1032,7 +1104,7 @@ test "Disconnect: PgUp/PgDn page the Connections, letters from `a` on each page"
     // (The fake graph is the same on every read.)
     _ = try app.key(arena, .{ .char = '2' }, small, scanner, wiring);
     for (0..20) |_| _ = try app.key(arena, .page_down, small, scanner, wiring);
-    try testing.expectEqual(App.Mode{ .disconnect = 7 }, app.mode);
+    try testing.expectEqual(App.Mode{ .disconnect = .{ .page = 7 } }, app.mode);
     _ = try app.key(arena, .{ .char = 'b' }, small, scanner, wiring);
     try testing.expect(!app.live());
     _ = try app.key(arena, .{ .char = 'a' }, small, scanner, wiring);
@@ -1080,4 +1152,244 @@ test "App.rows: the screen of the current mode" {
         try testing.expect(std.mem.find(u8, rows[2], body) != null);
         try testing.expect(std.mem.find(u8, rows[big.rows - 2], menu) != null);
     }
+}
+
+/// Sends each of `keys` as a character.
+fn typeKeys(app: *App, arena: Allocator, keys: []const u8, size: screen.Size, scanner: anytype, wiring: anytype) !void {
+    for (keys) |c| _ = try app.key(arena, .{ .char = c }, size, scanner, wiring);
+}
+
+test "Connect search: narrows as you type; Enter on the only match picks it" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    try typeKeys(&app, arena, "1/", big, scanner, wiring);
+    try testing.expectEqual(.typing, app.mode.connect.search.state);
+    try expectLabels(&.{ "Mic", "Synth" }, try focusedLabels(app, arena));
+    // Letters go to the field, not to picking; case is ignored.
+    try typeKeys(&app, arena, "SA", big, scanner, wiring);
+    try testing.expectEqual(null, app.mode.connect.pick);
+    try expectLabels(&.{}, try focusedLabels(app, arena));
+    const rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[3], "(no matches)") != null);
+    try testing.expect(std.mem.startsWith(u8, rows[big.rows - 1], "/SA"));
+    _ = try app.key(arena, .backspace, big, scanner, wiring);
+    try expectLabels(&.{"Synth"}, try focusedLabels(app, arena));
+    // Keys that aren't characters do nothing.
+    _ = try app.key(arena, .other, big, scanner, wiring);
+    try testing.expectEqualStrings("S", app.mode.connect.search.query());
+
+    // Picked, and the search goes with the step.
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqual(1, app.mode.connect.pick);
+    try testing.expectEqual(.to, app.mode.connect.focus);
+    try testing.expectEqual(.off, app.mode.connect.search.state);
+    try expectLabels(&.{"Headphones"}, try focusedLabels(app, arena));
+
+    // The second step too: the only Destination left connects.
+    try typeKeys(&app, arena, "/", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("✓ Synth → Headphones", app.home().status.text);
+}
+
+test "Connect search: Enter with several matches keeps the filter, and letters pick in it" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    // Speakers and Headphones.
+    _ = try app.key(arena, .{ .char = '1' }, big, scanner, wiring);
+    _ = try app.key(arena, .tab, big, scanner, wiring);
+    try typeKeys(&app, arena, "/e", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqual(.filtered, app.mode.connect.search.state);
+    try testing.expectEqual(null, app.mode.connect.pick);
+    try testing.expectEqualStrings("e", app.mode.connect.search.query());
+    try expectLabels(&.{ "Speakers", "Headphones" }, try focusedLabels(app, arena));
+    try typeKeys(&app, arena, "b", big, scanner, wiring);
+    try testing.expectEqual(3, app.mode.connect.pick);
+    try testing.expectEqual(.from, app.mode.connect.focus);
+    try testing.expectEqual(.off, app.mode.connect.search.state);
+}
+
+test "Connect search: Esc cancels, clears, then goes back; Backspace on empty closes; Tab clears" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    try typeKeys(&app, arena, "1/mic", big, scanner, wiring);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expectEqualDeep(App.Picking{}, app.mode.connect);
+
+    try typeKeys(&app, arena, "/i", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expectEqualDeep(App.Picking{}, app.mode.connect);
+
+    try typeKeys(&app, arena, "/", big, scanner, wiring);
+    _ = try app.key(arena, .backspace, big, scanner, wiring);
+    try testing.expectEqualDeep(App.Picking{}, app.mode.connect);
+
+    try typeKeys(&app, arena, "/i", big, scanner, wiring);
+    _ = try app.key(arena, .tab, big, scanner, wiring);
+    try testing.expectEqualDeep(App.Picking{ .focus = .to }, app.mode.connect);
+    try expectLabels(&.{ "Speakers", "Headphones" }, try focusedLabels(app, arena));
+
+    // In the second step, Tab doesn't move focus, so the filter stays.
+    try typeKeys(&app, arena, "a/x", big, scanner, wiring);
+    _ = try app.key(arena, .tab, big, scanner, wiring);
+    try testing.expectEqualStrings("x", app.mode.connect.search.query());
+
+    // Esc once per step: cancel, back to step 1, home.
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expectEqual(.off, app.mode.connect.search.state);
+    try testing.expectEqual(2, app.mode.connect.pick);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expectEqualDeep(App.Picking{ .focus = .to }, app.mode.connect);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqual(0, made.items.len);
+}
+
+test "Connect search: back to page 1 on every key; Esc after a pick goes to its page without the search" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // 60 Sources and one Destination.
+    var eps: [61]graph.Endpoint = undefined;
+    for (eps[0..60], 0..) |*ep, i| ep.* = pwEp(try std.fmt.allocPrint(arena, "Source {d}", .{i}), .audio, .from, try arena.dupe(u32, &.{@intCast(i)}));
+    eps[60] = pwEp("Speakers", .audio, .to, &.{100});
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &.{} }}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    // 4 rows for each column.
+    const small: screen.Size = .{ .rows = 12, .cols = 60 };
+    _ = try app.key(arena, .{ .char = '1' }, small, scanner, wiring);
+    for (0..3) |_| _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try typeKeys(&app, arena, "/", small, scanner, wiring);
+    try testing.expectEqual(0, app.mode.connect.page);
+    // Source 5, 15, 25, 35; 45, 50, 51, 52; …: 15 in 4 pages, paged while typing.
+    try typeKeys(&app, arena, "5", small, scanner, wiring);
+    _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try testing.expectEqual(1, app.mode.connect.page);
+    try testing.expect(std.mem.find(u8, (try app.rows(arena, small))[2], "FROM  2/4") != null);
+    try typeKeys(&app, arena, " ", small, scanner, wiring);
+    try testing.expectEqual(0, app.mode.connect.page);
+    _ = try app.key(arena, .page_down, small, scanner, wiring);
+    _ = try app.key(arena, .enter, small, scanner, wiring);
+    // Still on the page; `/` to edit it again keeps it there too.
+    try testing.expectEqual(1, app.mode.connect.page);
+    try typeKeys(&app, arena, "b", small, scanner, wiring);
+    try testing.expectEqual(50, app.mode.connect.pick);
+    // Source 50 is on page 13 of 15.
+    try testing.expectEqual(12, app.mode.connect.pick_page);
+    _ = try app.key(arena, .esc, small, scanner, wiring);
+    try testing.expectEqualDeep(App.Picking{ .page = 12 }, app.mode.connect);
+}
+
+/// Mic and Synth to Speakers, and Synth to Headphones.
+const studio_wired: graph.Graph = .{ .endpoints = &studio_eps, .connections = &.{
+    .{ .from = 0, .to = 2, .links = &.{.{ .ends = .{ .pw = .{ 1, 4 } }, .from_name = "", .to_name = "" }} },
+    .{ .from = 1, .to = 2, .links = &.{.{ .ends = .{ .pw = .{ 2, 4 } }, .from_name = "", .to_name = "" }} },
+    .{ .from = 1, .to = 3, .links = &.{.{ .ends = .{ .pw = .{ 2, 6 } }, .from_name = "", .to_name = "" }} },
+} };
+
+test "Disconnect search: either side, Enter on the only match undoes it" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio_wired}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    // A word on each side.
+    try typeKeys(&app, arena, "2/synth head", big, scanner, wiring);
+    var rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[3], "Headphones") != null);
+    try testing.expectEqualStrings("", rows[4]);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 2, 6 } }}, undone.items);
+    try testing.expectEqualStrings("✓ Disconnected Synth → Headphones", app.home().status.text);
+
+    // Two match: Enter keeps the filter, and letters pick in it.
+    try typeKeys(&app, arena, "2/speak", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqual(.filtered, app.mode.disconnect.search.state);
+    try typeKeys(&app, arena, "b", big, scanner, wiring);
+    try testing.expectEqualDeep(&[_]graph.Ends{ .{ .pw = .{ 2, 6 } }, .{ .pw = .{ 2, 4 } } }, undone.items);
+    try testing.expectEqualStrings("✓ Disconnected Synth → Speakers", app.home().status.text);
+
+    // Nothing: Enter only closes the field.
+    try typeKeys(&app, arena, "2/zz", big, scanner, wiring);
+    rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[3], "(no matches)") != null);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqual(.filtered, app.mode.disconnect.search.state);
+    try testing.expectEqual(2, undone.items.len);
+}
+
+test "Disconnect search: Esc cancels, clears, then goes back; paging starts over" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio_wired}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    // 1 row for the Connections: 3 pages.
+    const small: screen.Size = .{ .rows = 7, .cols = 60 };
+    try typeKeys(&app, arena, "2", small, scanner, wiring);
+    _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try typeKeys(&app, arena, "/", small, scanner, wiring);
+    try testing.expectEqualDeep(App.Mode{ .disconnect = .{ .search = .{ .state = .typing } } }, app.mode);
+    _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try testing.expectEqual(1, app.mode.disconnect.page);
+    _ = try app.key(arena, .other, small, scanner, wiring);
+    try testing.expectEqual(1, app.mode.disconnect.page);
+    _ = try app.key(arena, .esc, small, scanner, wiring);
+    try testing.expectEqualDeep(App.Mode{ .disconnect = .{} }, app.mode);
+
+    try typeKeys(&app, arena, "/s", small, scanner, wiring);
+    _ = try app.key(arena, .enter, small, scanner, wiring);
+    _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try testing.expectEqual(1, app.mode.disconnect.page);
+    _ = try app.key(arena, .esc, small, scanner, wiring);
+    try testing.expectEqualDeep(App.Mode{ .disconnect = .{} }, app.mode);
+    _ = try app.key(arena, .esc, small, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqual(0, undone.items.len);
 }

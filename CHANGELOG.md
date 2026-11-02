@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-11-01
+
+### Added
+
+- `/` search in Connect and Disconnect. `/` opens a search field on the status line (`/mini out`), and every key narrows the focused list live, with the letters from page 1 again. Matching ignores case, matches anywhere in the name shown (after aliases), and needs every word: `mini out` matches "MiniFuse 1 Main Output L/R". On Disconnect each word can be on either side of the Connection.
+- `Enter` closes the field and keeps the filter, so letters pick again; with exactly one match, `Enter` picks it. `Esc` while typing cancels the search; with a filter, `Esc` clears it and a second `Esc` goes back. `Backspace` on an empty field closes it. Nothing left shows `(no matches)`.
+- A filter only lives while its column has focus: `Tab` and the second Connect step clear it, and `Esc` back to the first step goes to the page of the first pick without it.
+- The menu shows `/ Search`, and `Esc Clear search` while a filter is on; while typing, it shows `Search: type to narrow   Enter Done   Esc Cancel`.
+
 ## [0.0.8] - 2026-11-01
 
 ### Added

@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const graph = @import("graph.zig");
 const picker = @import("picker.zig");
+const Search = @import("search.zig").Search;
 const text = @import("text.zig");
 
 pub const style = struct {
@@ -276,6 +277,8 @@ pub const Connect = struct {
     page: usize = 0,
     /// The first pick, shown in reverse video; null until there is one.
     pick: ?usize = null,
+    /// What the focused column is narrowed by; `from`/`to` already are.
+    search: Search = .{},
 
     fn list(c: Connect, direction: graph.Direction) []const usize {
         return if (direction == .from) c.from else c.to;
@@ -318,7 +321,7 @@ pub fn connect(arena: Allocator, c: Connect, size: Size) Error![]const []const u
             const focused = d == c.focus;
             const s = if (focused) shown[0] else shown[1];
             if (focused and nothing and i == 0) {
-                cl.* = try cell(arena, null, w, .{ .note = "(nothing to connect)" });
+                cl.* = try cell(arena, null, w, .{ .note = if (c.search.state != .off) "(no matches)" else "(nothing to connect)" });
                 continue;
             }
             if (i >= s.len) {
@@ -344,24 +347,51 @@ pub fn connect(arena: Allocator, c: Connect, size: Size) Error![]const []const u
         .body = lines.items,
         .scroll = 0,
         .menu = try connectMenu(arena, c, focused_pages.count() > 1),
-        .status = c.status,
+        .status = try searchStatus(arena, c.search, c.status),
     }, size);
 }
 
+const page_keys = style.bold ++ "PgUp/PgDn" ++ style.off ++ " Page   ";
+
+/// The menu while the search field is open.
+fn typingMenu(paged: bool) []const u8 {
+    const start = "Search: type to narrow   ";
+    const end = style.bold ++ "Enter" ++ style.off ++ " Done   " ++ style.bold ++ "Esc" ++ style.off ++ " Cancel";
+    return if (paged) start ++ page_keys ++ end else start ++ end;
+}
+
+/// `Esc` in a picker's menu: with a filter, it clears it first.
+fn escKey(s: Search) []const u8 {
+    return if (s.state == .filtered)
+        style.bold ++ "Esc" ++ style.off ++ " Clear search"
+    else
+        style.bold ++ "Esc" ++ style.off ++ " Back";
+}
+
+const search_key = style.bold ++ "/" ++ style.off ++ " Search   ";
+
+/// The status line while searching: the field, with a cursor while typing.
+fn searchStatus(arena: Allocator, s: Search, status: Status) Error!Status {
+    if (s.state == .off) return status;
+    const cursor = if (s.state == .typing) style.reverse ++ " " ++ style.off else "";
+    return .{ .text = try std.fmt.allocPrint(arena, "/{s}{s}", .{ s.query(), cursor }) };
+}
+
 fn connectMenu(arena: Allocator, c: Connect, paged: bool) Error![]const u8 {
+    if (c.search.state == .typing) return typingMenu(paged);
     var out: Writer.Allocating = .init(arena);
     const w = &out.writer;
     if (c.pick) |p| {
         const label = c.graph.endpoints[p].label;
         if (c.graph.endpoints[p].direction == .from)
-            try w.print("Connect {s} → pick where it goes   ", .{label})
+            try w.print("Connect {s} → pick where it goes   " ++ search_key, .{label})
         else
-            try w.print("Connect → {s}: pick what feeds it   ", .{label});
+            try w.print("Connect → {s}: pick what feeds it   " ++ search_key, .{label});
     } else {
-        try w.writeAll("Connect: pick a device   " ++ style.bold ++ "Tab" ++ style.off ++ " Other column   ");
+        try w.writeAll("Connect: pick a device   " ++ search_key ++ style.bold ++ "Tab" ++ style.off ++ " Other column   ");
     }
-    if (paged) try w.writeAll(style.bold ++ "PgUp/PgDn" ++ style.off ++ " Page   ");
-    try w.writeAll(style.bold ++ "Esc" ++ style.off ++ " Back");
+    if (paged) try w.writeAll(page_keys);
+    try w.writeAll(escKey(c.search));
     return out.toOwnedSlice();
 }
 
@@ -372,8 +402,12 @@ pub const Disconnect = struct {
     profile: []const u8,
     modified: bool,
     status: Status = .{},
+    /// Indexes into `graph.connections` of the ones listed: narrowed by
+    /// `search`, if any.
+    shown: []const usize,
     /// The list's page.
     page: usize = 0,
+    search: Search = .{},
 };
 
 /// Rows the Connections get on the Disconnect screen: the body less the header.
@@ -384,26 +418,31 @@ pub fn disconnectRows(size: Size) usize {
 /// The Disconnect screen, one string per row.
 pub fn disconnect(arena: Allocator, d: Disconnect, size: Size) Error![]const []const u8 {
     const g = d.graph;
-    const pages: picker.Pages = .init(g.connections.len, disconnectRows(size));
+    const pages: picker.Pages = .init(d.shown.len, disconnectRows(size));
     var lines: std.ArrayList([]const u8) = .empty;
     try lines.append(arena, if (pages.count() > 1)
         try std.fmt.allocPrint(arena, style.bold ++ "  CONNECTIONS  {d}/{d}" ++ style.off, .{ pages.clamp(d.page) + 1, pages.count() })
     else
         style.bold ++ "  CONNECTIONS" ++ style.off);
-    if (g.connections.len == 0) try lines.append(arena, dimLine("(no connections)"));
-    const shown = pages.slice(d.page);
-    for (g.connections[shown.start..][0..shown.len], 0..) |c, i| {
-        try lines.append(arena, try connectionLine(arena, g, c, size.cols, picker.letter(i)));
+    if (g.connections.len == 0) {
+        try lines.append(arena, dimLine("(no connections)"));
+    } else if (d.shown.len == 0) {
+        try lines.append(arena, dimLine("(no matches)"));
     }
+    const shown = pages.slice(d.page);
+    for (d.shown[shown.start..][0..shown.len], 0..) |c, i| {
+        try lines.append(arena, try connectionLine(arena, g, g.connections[c], size.cols, picker.letter(i)));
+    }
+    const paged = pages.count() > 1;
     return frame(arena, .{
         .title = try title(arena, d.profile, d.modified, size.cols),
         .body = lines.items,
         .scroll = 0,
-        .menu = if (pages.count() > 1)
-            "Disconnect: pick a connection   " ++ style.bold ++ "PgUp/PgDn" ++ style.off ++ " Page   " ++ style.bold ++ "Esc" ++ style.off ++ " Back"
+        .menu = if (d.search.state == .typing)
+            typingMenu(paged)
         else
-            "Disconnect: pick a connection   " ++ style.bold ++ "Esc" ++ style.off ++ " Back",
-        .status = d.status,
+            try std.mem.concat(arena, u8, &.{ "Disconnect: pick a connection   " ++ search_key, if (paged) page_keys else "", escKey(d.search) }),
+        .status = try searchStatus(arena, d.search, d.status),
     }, size);
 }
 
@@ -801,7 +840,7 @@ test "connect: letters in the focused column only, the other dimmed, Connections
         "",
         "",
         try dashes(arena, 50),
-        "Connect: pick a device   Tab Other column   Esc B…",
+        "Connect: pick a device   / Search   Tab Other col…",
         "",
     }, try plainRows(arena, rows));
     try testing.expect(std.mem.startsWith(u8, rows[3], style.bold ++ style.cyan ++ "a" ++ style.off ++ " " ++ style.audio ++ "● USB"));
@@ -827,11 +866,11 @@ test "connect: the first pick in reverse video, on its page of the other column"
         "  3 connections",
     }, p[2..6]);
     try testing.expect(std.mem.find(u8, rows[3], style.reverse ++ style.midi ++ "● Clipper") != null);
-    try testing.expectEqualStrings("Connect → Clipper MIDI 2: pick what feeds it   Es…", p[8]);
+    try testing.expectEqualStrings("Connect → Clipper MIDI 2: pick what feeds it   / …", p[8]);
 
     const from: Connect = .{ .graph = fixture, .profile = "default", .modified = false, .focus = .to, .from = try column(arena, fixture, .from), .to = &.{ 1, 5 }, .pick = 0 };
     const wide = try plainRows(arena, try connectRows(arena, from, .{ .rows = 10, .cols = 90 }));
-    try testing.expectEqualStrings("Connect USB Video Analog Stereo → pick where it goes   Esc Back", wide[8]);
+    try testing.expectEqualStrings("Connect USB Video Analog Stereo → pick where it goes   / Search   Esc Back", wide[8]);
 }
 
 test "connect: more than a page shows which page, and PgUp/PgDn in the menu" {
@@ -856,7 +895,7 @@ test "connect: more than a page shows which page, and PgUp/PgDn in the menu" {
         "",
         "  no connections",
         try dashes(arena, 70),
-        "Connect: pick a device   Tab Other column   PgUp/PgDn Page   Esc Back",
+        "Connect: pick a device   / Search   Tab Other column   PgUp/PgDn Page…",
     }, p[2..10]);
 
     // The last page is short; a page past it is the last one.
@@ -880,7 +919,7 @@ test "connect: more than a page shows which page, and PgUp/PgDn in the menu" {
         "",
         "  no connections",
     }, p[2..8]);
-    try testing.expectEqualStrings("Connect: pick a device   Tab Other column   Esc Back", p[9]);
+    try testing.expectEqualStrings("Connect: pick a device   / Search   Tab Other column   Esc Back", p[9]);
 }
 
 test "connect: one connection; a tiny terminal shows what fits" {
@@ -909,7 +948,7 @@ test "disconnect: the Connections with letters, in place of the columns" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const d: Disconnect = .{ .graph = fixture, .profile = "default", .modified = true, .status = .{ .text = "✓ earlier" } };
+    const d: Disconnect = .{ .graph = fixture, .profile = "default", .modified = true, .status = .{ .text = "✓ earlier" }, .shown = &.{ 0, 1, 2 } };
     const rows = try disconnect(arena, d, .{ .rows = 12, .cols = 50 });
     try expectRows(&.{
         "aroute  profile: default (modified)   ● audio  ● …",
@@ -922,13 +961,13 @@ test "disconnect: the Connections with letters, in place of the columns" {
         "",
         "",
         try dashes(arena, 50),
-        "Disconnect: pick a connection   Esc Back",
+        "Disconnect: pick a connection   / Search   Esc Ba…",
         "✓ earlier",
     }, try plainRows(arena, rows));
     try testing.expect(std.mem.startsWith(u8, rows[3], style.bold ++ style.cyan ++ "a" ++ style.off ++ " " ++ style.audio ++ "● USB"));
     try testing.expect(std.mem.startsWith(u8, rows[4], style.bold ++ style.cyan ++ "b" ++ style.off ++ " " ++ style.midi ++ "● WORLDE"));
 
-    const none: Disconnect = .{ .graph = .{ .endpoints = &.{}, .connections = &.{} }, .profile = "default", .modified = false };
+    const none: Disconnect = .{ .graph = .{ .endpoints = &.{}, .connections = &.{} }, .profile = "default", .modified = false, .shown = &.{} };
     const p = try plainRows(arena, try disconnect(arena, none, .{ .rows = 12, .cols = 50 }));
     try expectRows(&.{ "  CONNECTIONS", "  (no connections)", "" }, p[2..5]);
 }
@@ -946,7 +985,7 @@ test "disconnect: more than a page shows which page, letters from `a` on each" {
     const size: Size = .{ .rows = 9, .cols = 70 };
     try testing.expectEqual(3, disconnectRows(size));
 
-    var d: Disconnect = .{ .graph = g, .profile = "default", .modified = false, .page = 1 };
+    var d: Disconnect = .{ .graph = g, .profile = "default", .modified = false, .shown = &.{ 0, 1, 2, 3, 4, 5, 6 }, .page = 1 };
     var p = try plainRows(arena, try disconnect(arena, d, size));
     try expectRows(&.{
         "  CONNECTIONS  2/3",
@@ -954,7 +993,7 @@ test "disconnect: more than a page shows which page, letters from `a` on each" {
         "b ● WORLDE                         → 日本語のスピーカー",
         "c ● Speakers · monitor             → Clipper MIDI 2",
         try dashes(arena, 70),
-        "Disconnect: pick a connection   PgUp/PgDn Page   Esc Back",
+        "Disconnect: pick a connection   / Search   PgUp/PgDn Page   Esc Back",
     }, p[2..8]);
 
     // The last page is short; a page past it is the last one.
@@ -973,9 +1012,106 @@ test "disconnect: a tiny terminal shows what fits" {
         .{ .rows = 7, .cols = 12 }, .{ .rows = 8, .cols = 3 }, .{ .rows = 9, .cols = 20 }, .{ .rows = 10, .cols = 4 },
     }) |size| {
         for ([_]usize{ 0, 1, 5 }) |page| {
-            const rows = try disconnect(arena, .{ .graph = fixture, .profile = "default", .modified = true, .page = page }, size);
+            const rows = try disconnect(arena, .{ .graph = fixture, .profile = "default", .modified = true, .shown = &.{ 0, 1, 2 }, .page = page }, size);
             try testing.expectEqual(size.rows, rows.len);
             for (rows) |r| try testing.expect(text.width(r) <= size.cols);
         }
     }
+}
+
+/// A search in `state`, holding `query`.
+fn searchFor(state: Search.State, query: []const u8) Search {
+    var s: Search = .{ .state = state, .len = query.len };
+    @memcpy(s.buf[0..query.len], query);
+    return s;
+}
+
+test "connect: searching shows the field on the status line, and what the keys do" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const size: Size = .{ .rows = 10, .cols = 80 };
+    var c: Connect = .{ .graph = fixture, .profile = "default", .modified = false, .focus = .from, .from = &.{0}, .to = try column(arena, fixture, .to), .search = searchFor(.typing, "usb") };
+    var rows = try connectRows(arena, c, size);
+    var p = try plainRows(arena, rows);
+    try testing.expectEqualStrings("a ● USB Video Analog Stereo            │   ● Speakers                          ", p[3]);
+    try testing.expectEqualStrings("Search: type to narrow   Enter Done   Esc Cancel", p[8]);
+    try testing.expectEqualStrings("/usb ", p[9]);
+    // The cursor.
+    try testing.expect(std.mem.endsWith(u8, rows[9], style.reverse ++ " " ++ style.off));
+
+    // Closed, with the filter kept: no cursor, and Esc clears it.
+    c.search.state = .filtered;
+    rows = try connectRows(arena, c, size);
+    p = try plainRows(arena, rows);
+    try testing.expectEqualStrings("Connect: pick a device   / Search   Tab Other column   Esc Clear search", p[8]);
+    try testing.expectEqualStrings("/usb", p[9]);
+
+    // Nothing left.
+    c.from = &.{};
+    p = try plainRows(arena, try connectRows(arena, c, size));
+    try testing.expectEqualStrings("  (no matches)                         │   ● Speakers                          ", p[3]);
+    // The status line said something before the search: the field is shown instead.
+    c.search.state = .off;
+    c.status = .{ .text = "✓ earlier" };
+    p = try plainRows(arena, try connectRows(arena, c, size));
+    try testing.expectEqualStrings("  (nothing to connect)                 │   ● Speakers                          ", p[3]);
+    try testing.expectEqualStrings("✓ earlier", p[9]);
+    c.search = searchFor(.typing, "");
+    p = try plainRows(arena, try connectRows(arena, c, size));
+    try testing.expectEqualStrings("/ ", p[9]);
+}
+
+test "connect: searching more than a page still pages" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const c: Connect = .{ .graph = fixture, .profile = "default", .modified = false, .focus = .to, .from = &.{}, .to = &.{ 1, 5, 3 }, .search = searchFor(.typing, "") };
+    // 2 rows for the columns.
+    const p = try plainRows(arena, try connectRows(arena, c, .{ .rows = 10, .cols = 80 }));
+    try testing.expectEqualStrings("Search: type to narrow   PgUp/PgDn Page   Enter Done   Esc Cancel", p[8]);
+}
+
+test "disconnect: searching shows the field, (no matches) when nothing is left" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const size: Size = .{ .rows = 9, .cols = 70 };
+    var d: Disconnect = .{ .graph = fixture, .profile = "default", .modified = false, .shown = &.{2}, .search = searchFor(.typing, "clip") };
+    var rows = try disconnect(arena, d, size);
+    var p = try plainRows(arena, rows);
+    try expectRows(&.{
+        "  CONNECTIONS",
+        "a ● Speakers · monitor             → Clipper MIDI 2",
+        "",
+        "",
+        try dashes(arena, 70),
+        "Search: type to narrow   Enter Done   Esc Cancel",
+        "/clip ",
+    }, p[2..9]);
+    try testing.expect(std.mem.endsWith(u8, rows[8], style.reverse ++ " " ++ style.off));
+
+    d.search.state = .filtered;
+    d.shown = &.{};
+    p = try plainRows(arena, try disconnect(arena, d, size));
+    try expectRows(&.{
+        "  CONNECTIONS",
+        "  (no matches)",
+        "",
+        "",
+        try dashes(arena, 70),
+        "Disconnect: pick a connection   / Search   Esc Clear search",
+        "/clip",
+    }, p[2..9]);
+
+    // A page and a half: the typing menu still says PgUp/PgDn.
+    d.search.state = .typing;
+    d.shown = &.{ 0, 1, 2 };
+    rows = try disconnect(arena, d, .{ .rows = 8, .cols = 80 });
+    p = try plainRows(arena, rows);
+    try testing.expectEqualStrings("  CONNECTIONS  1/2", p[2]);
+    try testing.expectEqualStrings("Search: type to narrow   PgUp/PgDn Page   Enter Done   Esc Cancel", p[6]);
 }
