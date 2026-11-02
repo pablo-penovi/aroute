@@ -928,10 +928,12 @@ test "Midi-Bridge ports stand for the ALSA Port they bridge" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const scan = try alsa.parse(arena, .{
-        .sources = "client 20: 'WORLDE' [type=kernel]\n    0 'WORLDE MIDI 1   '\n" ++
-            "client 21: 'Pad' [type=kernel]\n    0 'Pad'\n",
-        .destinations = "client 20: 'WORLDE' [type=kernel]\n    0 'WORLDE MIDI 1   '\n",
-        .connections = "client 21: 'Pad' [type=kernel]\n    0 'Pad'\n\tConnecting To: 20:0\n",
+        .clients = &.{ .{ .id = 20, .name = "WORLDE" }, .{ .id = 21, .name = "Pad" } },
+        .ports = &.{
+            .{ .addr = .{ .client = 20, .port = 0 }, .name = "WORLDE MIDI 1", .caps = .{ .read = true, .write = true, .subs_read = true, .subs_write = true } },
+            .{ .addr = .{ .client = 21, .port = 0 }, .name = "Pad", .caps = .{ .read = true, .subs_read = true } },
+        },
+        .subscriptions = &.{.{ .from = .{ .client = 21, .port = 0 }, .to = .{ .client = 20, .port = 0 } }},
     }, false);
     const dump = comptime "[" ++
         testNode(5, "\"node.name\":\"Midi-Bridge\",\"media.class\":\"Midi/Bridge\"") ++
@@ -946,7 +948,7 @@ test "Midi-Bridge ports stand for the ALSA Port they bridge" {
         testLink(90, 61, 52) ++
         testLink(91, 51, 62) ++
         testLink(92, 54, 62) ++
-        // Wired both through PipeWire and with aconnect: one Connection.
+        // Wired both through PipeWire and through the sequencer: one Connection.
         testLink(93, 53, 52) ++
         \\{"id":0,"type":"PipeWire:Interface:Core","info":{}}]
     ;

@@ -8,7 +8,8 @@ const pipewire = @import("pipewire.zig");
 const alsa = @import("alsa.zig");
 const Aliases = @import("aliases.zig").Aliases;
 
-/// `--help`: the same text as the script's.
+/// `--help`: the same text as the script's, apart from listing `--help` itself
+/// and how ALSA MIDI is wired.
 pub const help =
     \\aroute — two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI.
     \\
@@ -18,10 +19,12 @@ pub const help =
     \\  aroute --save NAME      save all current connections as a profile
     \\  aroute --load NAME [--force]
     \\                          replace all current connections with a profile
+    \\  aroute --help           print this usage and more on profiles and aliases
     \\
     \\Audio is always routed with pw-link. MIDI between two ALSA sequencer ports
-    \\uses aconnect; MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes
-    \\through pw-link via PipeWire's Midi-Bridge.
+    \\is wired through the kernel's ALSA sequencer directly; MIDI involving a
+    \\PipeWire-only port (e.g. BLE MIDI) goes through pw-link via PipeWire's
+    \\Midi-Bridge.
     \\
     \\Profiles: ${XDG_CONFIG_HOME:-~/.config}/aroute/profiles/<name>.conf, one
     \\"FROM|TO" port pair per line. Ports are named "pw:<node.name>:<port.name>"
@@ -121,11 +124,7 @@ test "list: real machine with ALSA MIDI and BLE MIDI" {
     const arena = arena_state.allocator();
 
     // Matches the script's --list on the same captures, apart from the snapshot indent.
-    const midi = try alsa.parse(arena, .{
-        .sources = @embedFile("testdata/aconnect-i.txt"),
-        .destinations = @embedFile("testdata/aconnect-o.txt"),
-        .connections = @embedFile("testdata/aconnect-l.txt"),
-    }, false);
+    const midi = try alsa.parse(arena, @import("testdata/seq-listing.zig").listing, false);
     const g = try pipewire.parse(arena, @embedFile("testdata/pw-dump-midi.json"), midi);
 
     var out: Writer.Allocating = .init(arena);
@@ -177,8 +176,21 @@ test "list: real machine with ALSA MIDI and BLE MIDI" {
     , out.written());
 }
 
-test "help: same text as the script's --help" {
-    try testing.expectEqualStrings(@embedFile("testdata/script-help.txt"), help);
+test "help: the script's --help, apart from listing --help and how ALSA MIDI is wired" {
+    const script = @embedFile("testdata/script-help.txt");
+    const load = "replace all current connections with a profile\n";
+    const with_help = try std.mem.replaceOwned(u8, testing.allocator, script, load, load ++
+        "  aroute --help           print this usage and more on profiles and aliases\n");
+    defer testing.allocator.free(with_help);
+    const theirs = "uses aconnect; MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes\n" ++
+        "through pw-link via PipeWire's Midi-Bridge.\n";
+    const ours = "is wired through the kernel's ALSA sequencer directly; MIDI involving a\n" ++
+        "PipeWire-only port (e.g. BLE MIDI) goes through pw-link via PipeWire's\n" ++
+        "Midi-Bridge.\n";
+    const want = try std.mem.replaceOwned(u8, testing.allocator, with_help, theirs, ours);
+    defer testing.allocator.free(want);
+    try testing.expect(!std.mem.eql(u8, script, with_help) and !std.mem.eql(u8, with_help, want));
+    try testing.expectEqualStrings(want, help);
 }
 
 test "list: empty graph" {

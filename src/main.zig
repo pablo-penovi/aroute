@@ -5,6 +5,7 @@ const cli = @import("cli.zig");
 const graph = @import("graph.zig");
 const pipewire = @import("pipewire.zig");
 const alsa = @import("alsa.zig");
+const seq = @import("seq.zig");
 const tools = @import("tools.zig");
 const profile = @import("profile.zig");
 const load = @import("load.zig");
@@ -37,6 +38,10 @@ pub fn main(init: std.process.Init) !void {
         .clock = savedAt,
     };
     const show_all = showAll(init.environ_map.*);
+    // No sequencer (no `/dev/snd/seq`, or no permission) just means no ALSA MIDI.
+    const sequencer: ?seq.Seq = seq.Seq.open("aroute") catch null;
+    defer if (sequencer) |s| s.close();
+    const source: Source = .{ .io = io, .seq = sequencer, .aliases = aliases, .show_all = show_all };
 
     var buf: [4096]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &buf);
@@ -44,14 +49,14 @@ pub fn main(init: std.process.Init) !void {
 
     const command: []const u8 = if (args.len > 1) args[1] else "";
     if (std.mem.eql(u8, command, "--list")) {
-        try cli.list(out, arena, try scan(arena, io, aliases, show_all));
+        try cli.list(out, arena, try source.scan(arena));
     } else if (std.mem.eql(u8, command, "--profiles")) {
         for (try store.list(arena)) |name| try out.print("{s}\n", .{name});
     } else if (std.mem.eql(u8, command, "--save")) {
         const name: []const u8 = if (args.len > 2) args[2] else "";
         if (name.len == 0) die(io, "usage: aroute --save NAME", .{});
         if (!profile.validName(name)) die(io, profile.invalid_name, .{});
-        const g = try scan(arena, io, aliases, show_all);
+        const g = try source.scan(arena);
         const path = try store.path(arena, name);
         store.save(arena, name, g) catch |err| switch (err) {
             error.Unwritable => die(io, "could not write {s}", .{path}),
@@ -63,14 +68,14 @@ pub fn main(init: std.process.Init) !void {
         if (name.len == 0) die(io, "usage: aroute --load NAME [--force]", .{});
         const flag: []const u8 = if (args.len > 3) args[3] else "";
         if (flag.len > 0 and !std.mem.eql(u8, flag, "--force")) die(io, "unknown option '{s}' (try --help)", .{flag});
-        const g = try scan(arena, io, aliases, show_all);
+        const g = try source.scan(arena);
         const saved = store.read(arena, name) catch |err| switch (err) {
             error.Unreadable => die(io, "no profile named '{s}'", .{name}),
             error.OutOfMemory => return error.OutOfMemory,
         };
         const p = try load.plan(arena, g, saved);
         if (p.missing_audio.len > 0) try confirmMissing(io, name, p.missing_audio, flag.len > 0);
-        const result = try load.apply(arena, g, p, Wiring{ .arena = arena, .io = io });
+        const result = try load.apply(arena, g, p, Wiring{ .arena = arena, .io = io, .seq = sequencer });
         try load.summary(out, name, p, result, .{});
         try out.writeByte('\n');
     } else if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
@@ -79,8 +84,7 @@ pub fn main(init: std.process.Init) !void {
         if (!try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) {
             die(io, "the TUI needs a terminal (see --help for non-interactive use)", .{});
         }
-        const scanner: Scanner = .{ .io = io, .aliases = aliases, .show_all = show_all };
-        tui.run(init.gpa, io, scanner, TuiWiring{ .io = io }, store) catch |err| switch (err) {
+        tui.run(init.gpa, io, Scanner{ .source = source }, TuiWiring{ .io = io, .seq = sequencer }, store) catch |err| switch (err) {
             error.Unreadable => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
             else => |e| return e,
         };
@@ -116,21 +120,25 @@ fn confirmMissing(io: Io, name: []const u8, missing: []const []const u8, force: 
 const Wiring = struct {
     arena: Allocator,
     io: Io,
+    seq: ?seq.Seq,
 
     pub fn connect(w: Wiring, ends: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
-        tools.connect(w.arena, w.io, ends, null) catch |err| return w.fail(err, ends);
+        switch (ends) {
+            .pw => |p| tools.connect(w.arena, w.io, p, null) catch |err| return w.fail(err),
+            .alsa => |a| if (try alsaConnect(w.seq, w.arena, a) != null) return error.ToolFailed,
+        }
     }
 
     pub fn disconnect(w: Wiring, ends: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
-        tools.disconnect(w.arena, w.io, ends) catch |err| return w.fail(err, ends);
+        switch (ends) {
+            .pw => |p| tools.disconnect(w.arena, w.io, p) catch |err| return w.fail(err),
+            .alsa => |a| if (!alsaDisconnect(w.seq, a)) return error.ToolFailed,
+        }
     }
 
-    fn fail(w: Wiring, err: tools.Error, ends: graph.Ends) error{ ToolFailed, OutOfMemory } {
+    fn fail(w: Wiring, err: tools.Error) error{ ToolFailed, OutOfMemory } {
         return switch (err) {
-            error.MissingTool => die(w.io, "missing dependency: {s}", .{switch (ends) {
-                .pw => "pw-link",
-                .alsa => "aconnect",
-            }}),
+            error.MissingTool => die(w.io, "missing dependency: pw-link", .{}),
             error.ToolFailed => error.ToolFailed,
             error.OutOfMemory => error.OutOfMemory,
         };
@@ -140,15 +148,17 @@ const Wiring = struct {
 /// Changes the graph for the TUI.
 const TuiWiring = struct {
     io: Io,
+    seq: ?seq.Seq,
 
-    /// Makes a Link; null if it was made, else what the tool said.
+    /// Makes a Link; null if it was made, else what went wrong.
     pub fn connect(w: TuiWiring, arena: Allocator, ends: graph.Ends) Allocator.Error!?[]const u8 {
+        const p = switch (ends) {
+            .pw => |p| p,
+            .alsa => |a| return alsaConnect(w.seq, arena, a),
+        };
         var why: []const u8 = "";
-        tools.connect(arena, w.io, ends, &why) catch |err| switch (err) {
-            error.MissingTool => die(w.io, "missing dependency: {s}", .{switch (ends) {
-                .pw => "pw-link",
-                .alsa => "aconnect",
-            }}),
+        tools.connect(arena, w.io, p, &why) catch |err| switch (err) {
+            error.MissingTool => die(w.io, "missing dependency: pw-link", .{}),
             error.ToolFailed => return why,
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -157,17 +167,30 @@ const TuiWiring = struct {
 
     /// Undoes a Link; whether it did.
     pub fn disconnect(w: TuiWiring, arena: Allocator, ends: graph.Ends) Allocator.Error!bool {
-        tools.disconnect(arena, w.io, ends) catch |err| switch (err) {
-            error.MissingTool => die(w.io, "missing dependency: {s}", .{switch (ends) {
-                .pw => "pw-link",
-                .alsa => "aconnect",
-            }}),
+        const p = switch (ends) {
+            .pw => |p| p,
+            .alsa => |a| return alsaDisconnect(w.seq, a),
+        };
+        tools.disconnect(arena, w.io, p) catch |err| switch (err) {
+            error.MissingTool => die(w.io, "missing dependency: pw-link", .{}),
             error.ToolFailed => return false,
             error.OutOfMemory => return error.OutOfMemory,
         };
         return true;
     }
 };
+
+/// Null if made, else why not. Without a sequencer there are no ALSA Ports
+/// to wire; this says what `aconnect` said then.
+fn alsaConnect(s: ?seq.Seq, arena: Allocator, a: [2]graph.Addr) Allocator.Error!?[]const u8 {
+    const open = s orelse return "can't open sequencer";
+    return open.connect(arena, a[0], a[1]);
+}
+
+fn alsaDisconnect(s: ?seq.Seq, a: [2]graph.Addr) bool {
+    const open = s orelse return false;
+    return open.disconnect(a[0], a[1]);
+}
 
 /// Local time as the script writes it (`date '+%F %T'`); empty, as in the
 /// script, if `date` fails.
@@ -179,53 +202,47 @@ fn savedAt(arena: Allocator, io: Io) Allocator.Error![]const u8 {
     return std.mem.trimEnd(u8, now, "\n");
 }
 
-/// Reads the graph, with aliases applied to every Endpoint label.
-fn scan(arena: Allocator, io: Io, aliases: Aliases, show_all: bool) Allocator.Error!graph.Graph {
-    return readGraph(arena, io, aliases, show_all) catch |err| switch (err) {
-        error.Unreadable => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
-        error.OutOfMemory => error.OutOfMemory,
-    };
-}
-
-/// Reads the graph for the TUI, every second.
-const Scanner = struct {
+/// Where the graph is read from.
+const Source = struct {
     io: Io,
+    seq: ?seq.Seq,
     aliases: Aliases,
     show_all: bool,
 
-    pub fn scan(s: Scanner, arena: Allocator) tui.ScanError!graph.Graph {
-        return readGraph(arena, s.io, s.aliases, s.show_all);
+    /// Reads the graph, with aliases applied to every Endpoint label.
+    fn scan(s: Source, arena: Allocator) Allocator.Error!graph.Graph {
+        return s.read(arena) catch |err| switch (err) {
+            error.Unreadable => die(s.io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    }
+
+    /// Like `scan`, but a graph that can't be read is an error.
+    fn read(s: Source, arena: Allocator) tui.ScanError!graph.Graph {
+        const dump = tools.pwDump(arena, s.io) catch |err| switch (err) {
+            error.MissingTool => die(s.io, "missing dependency: pw-dump", .{}),
+            error.ToolFailed => return error.Unreadable,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const listing: seq.Listing = if (s.seq) |open| try open.list(arena) else .none;
+        const midi = try alsa.parse(arena, listing, s.show_all);
+        var g = pipewire.parse(arena, dump, midi) catch |err| switch (err) {
+            error.InvalidDump => return error.Unreadable,
+            else => |e| return e,
+        };
+        try g.applyAliases(arena, s.aliases);
+        return g;
     }
 };
 
-/// Like `scan`, but a graph that can't be read is an error.
-fn readGraph(arena: Allocator, io: Io, aliases: Aliases, show_all: bool) tui.ScanError!graph.Graph {
-    const dump = tools.pwDump(arena, io) catch |err| switch (err) {
-        error.MissingTool => die(io, "missing dependency: pw-dump", .{}),
-        error.ToolFailed => return error.Unreadable,
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-    const midi = try alsa.parse(arena, .{
-        .sources = try aconnect(arena, io, .sources),
-        .destinations = try aconnect(arena, io, .destinations),
-        .connections = try aconnect(arena, io, .connections),
-    }, show_all);
-    var g = pipewire.parse(arena, dump, midi) catch |err| switch (err) {
-        error.InvalidDump => return error.Unreadable,
-        else => |e| return e,
-    };
-    try g.applyAliases(arena, aliases);
-    return g;
-}
+/// Reads the graph for the TUI, every second.
+const Scanner = struct {
+    source: Source,
 
-/// Like the script, a failing `aconnect` (e.g. no ALSA sequencer) just means no ALSA MIDI.
-fn aconnect(arena: Allocator, io: Io, list: tools.AconnectList) Allocator.Error![]const u8 {
-    return tools.aconnect(arena, io, list) catch |err| switch (err) {
-        error.MissingTool => die(io, "missing dependency: aconnect", .{}),
-        error.ToolFailed => "",
-        error.OutOfMemory => error.OutOfMemory,
-    };
-}
+    pub fn scan(s: Scanner, arena: Allocator) tui.ScanError!graph.Graph {
+        return s.source.read(arena);
+    }
+};
 
 /// `AROUTE_SHOW_ALL=1` also lists the normally hidden Midi Through clients and Sync ports.
 fn showAll(env: std.process.Environ.Map) bool {
@@ -293,4 +310,27 @@ test "AROUTE_SHOW_ALL is on only when it is 1" {
     try std.testing.expect(!showAll(env));
     try env.put("AROUTE_SHOW_ALL", "1");
     try std.testing.expect(showAll(env));
+}
+
+test "ALSA Links go through the sequencer, if there is one" {
+    const device = seq.Seq.open("aroute test device") catch return error.SkipZigTest;
+    defer device.close();
+    const caps: seq.Caps = .{ .read = true, .write = true, .subs_read = true, .subs_write = true };
+    const a = try device.createPort("test port A", caps);
+    const b = try device.createPort("test port B", caps);
+    const s = try seq.Seq.open("aroute");
+    defer s.close();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqual(null, try alsaConnect(s, arena, .{ a, b }));
+    try std.testing.expect(alsaDisconnect(s, .{ a, b }));
+    try std.testing.expect(!alsaDisconnect(s, .{ a, b }));
+    const gone: graph.Addr = .{ .client = device.client, .port = 200 };
+    try std.testing.expectEqualStrings("Connection failed (Invalid argument)", (try alsaConnect(s, arena, .{ a, gone })).?);
+
+    // Without a sequencer, as `aconnect` said then.
+    try std.testing.expectEqualStrings("can't open sequencer", (try alsaConnect(null, arena, .{ a, b })).?);
+    try std.testing.expect(!alsaDisconnect(null, .{ a, b }));
 }

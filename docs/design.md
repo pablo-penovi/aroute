@@ -38,12 +38,13 @@ Available only while picking (Connect, Disconnect, Load, Delete), never on the h
 
 - The graph is re-read every second on the home screen only. While picking, the list is frozen so letters don't move.
 - Just before acting, the graph is re-read and the pick checked; if it is gone, the status shows "✗ … is gone" instead of acting on something else.
-- The graph is read and changed through `pw-dump`, `pw-link` and `aconnect` ([ADR 0001](adr/0001-shell-out-to-pipewire-and-alsa-tools.md)). Running the tools is kept separate from turning their output into Endpoints and Connections, which is tested against captured `pw-dump`/`aconnect` output.
+- PipeWire is read and changed through `pw-dump` and `pw-link` ([ADR 0001](adr/0001-shell-out-to-pipewire-and-alsa-tools.md)). ALSA MIDI is read and changed through the kernel's sequencer interface on `/dev/snd/seq` directly, with the same rules as `aconnect` ([ADR 0002](adr/0002-talk-to-the-alsa-sequencer-through-the-kernel.md)). Reading is kept separate from turning what was read into Endpoints and Connections, which is tested against captured `pw-dump` output and a sequencer listing.
 
 ## Other differences from the script
 
 Besides picking and search above, these are deliberate; everything else matches the script.
 
+- **`--help`** lists `aroute --help` among the commands, and says MIDI between two ALSA Ports is wired through the ALSA sequencer directly, not with `aconnect` ([ADR 0002](adr/0002-talk-to-the-alsa-sequencer-through-the-kernel.md)); the rest of the text is the script's.
 - **`--list`** indents every snapshot line (the script indents only the first) and exits 0 when there are no Connections.
 - **`--save`** with no Connections saves an empty Profile, says `Saved …` and exits 0 (the script writes it too, but exits 1 without a word). **`--profiles`** also lists names starting with `.`.
 - **Fitting the screen**: nothing wraps. Names, the title, the menu and the profiles directory in the PROFILES header are cut with `…` by display width, so wide characters and combining marks line up. A home screen that doesn't fit scrolls (see Screens) instead of ending in `… N more (enlarge the terminal)`, and so does the missing-Devices screen on Load.

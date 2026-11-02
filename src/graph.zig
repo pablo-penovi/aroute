@@ -13,7 +13,7 @@ pub const Kind = enum { audio, midi };
 /// Which tool the Endpoint's Ports are wired through.
 pub const Backend = enum { pw, alsa };
 
-/// An ALSA sequencer Port, as `aconnect` writes it: `client:port`.
+/// An ALSA sequencer Port, written `client:port` as `aconnect` does.
 pub const Addr = struct {
     client: u16,
     port: u16,
@@ -65,8 +65,8 @@ pub const Endpoint = struct {
     }
 };
 
-/// The Source-side and Destination-side Port of a Link: what `pw-link` or
-/// `aconnect` take to make it, or with `-d` to undo it.
+/// The Source-side and Destination-side Port of a Link: what `pw-link` takes
+/// to make or undo it, or what the sequencer subscribes and unsubscribes.
 pub const Ends = union(Backend) {
     pw: [2]u32,
     alsa: [2]Addr,

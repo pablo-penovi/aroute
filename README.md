@@ -5,7 +5,7 @@
 
 A two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI, written in Zig.
 
-Sources go on the left (FROM), Destinations on the right (TO). Connect, disconnect, and save the whole set of connections as a profile you can load later. Audio is routed with `pw-link`; MIDI between two ALSA sequencer ports uses `aconnect`, and MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes through PipeWire's Midi-Bridge.
+Sources go on the left (FROM), Destinations on the right (TO). Connect, disconnect, and save the whole set of connections as a profile you can load later. Audio is routed with `pw-link`; MIDI between two ALSA sequencer ports is wired through the kernel's sequencer interface directly, and MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes through PipeWire's Midi-Bridge.
 
 > **Status:** released; binaries are on the [Releases](https://github.com/pablo-penovi/aroute/releases) page. Everything the script does works the same, apart from the deliberate differences in [docs/design.md](docs/design.md). This is a rewrite of a bash script of the same name.
 
@@ -34,7 +34,7 @@ Set `AROUTE_SHOW_ALL=1` to also list normally hidden ports (Midi Through, Sync p
 
 - Zig 0.17 to build
 - PipeWire with `pw-dump` and `pw-link`
-- `aconnect` (alsa-utils)
+- For ALSA MIDI, access to `/dev/snd/seq` (alsa-utils is not needed)
 - `kcov` for coverage reports (development only)
 
 ## Building
