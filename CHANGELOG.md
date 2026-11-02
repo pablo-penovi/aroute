@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-02
+
+### Changed
+
+- The TUI reads PipeWire from one `pw-dump --monitor` that it keeps running, folding in the changes it writes, instead of running `pw-dump` and parsing the whole graph every second (ADR 0003). The home screen still re-reads once a second, now without starting a process. `--list`, `--save` and `--load` still run `pw-dump` once.
+- After Connect, Disconnect and Load, the TUI waits until the Links it made or undid show up, at most a second, before showing the graph. So a loaded Profile isn't shown `(modified)` because of a Link that showed up a few milliseconds late.
+- If `pw-dump` exits, as when PipeWire stops, the status line says `✗ cannot read the PipeWire graph (is PipeWire running?)` and the last graph stays up; aroute starts `pw-dump` again, at most once a second, and the message clears once it reads the graph. Quitting in any way, Ctrl-C and SIGTERM included, stops it.
+
 ## [0.1.2] - 2026-11-02
 
 ### Changed

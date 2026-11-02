@@ -2,6 +2,13 @@
 //! every second; Connect and Disconnect; saving, loading and deleting
 //! Profiles; and `/` search in the pickers (`search.zig`). Drawing is in
 //! `screen.zig`, the terminal in `term.zig`.
+//!
+//! The `scanner` the App is given reads the graph: `scanner.scan(arena)`
+//! reads it into `arena`; `scanner.drain()` takes in what changed without
+//! reading it, so a source that streams changes isn't held up while the
+//! graph shown stays as it is; and `scanner.settle(made, undone)` waits,
+//! briefly, until the Links aroute just made show up and those it undid
+//! are gone, so the re-read that follows shows them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -180,6 +187,13 @@ pub const App = struct {
             error.OutOfMemory => return error.OutOfMemory,
         };
         app.replace(fresh);
+    }
+
+    /// Once a second: re-reads the graph on the home screen. Elsewhere it
+    /// stays as it is, so letters don't move, but changes are still taken in.
+    pub fn tick(app: *App, scanner: anytype) Allocator.Error!void {
+        if (app.live()) return app.refresh(scanner);
+        try scanner.drain();
     }
 
     /// Re-reads the graph, as `refresh`; whether it could.
@@ -548,11 +562,14 @@ pub const App = struct {
             } };
             return;
         }
-        const result = try load.apply(arena, app.current.graph, p, Applying(@TypeOf(wiring)){ .arena = arena, .wiring = wiring });
+        var changed: Changed = .{};
+        const result = try load.apply(arena, app.current.graph, p, Applying(@TypeOf(wiring)){ .arena = arena, .wiring = wiring, .changed = &changed });
         var summary: std.Io.Writer.Allocating = .init(arena);
         load.summary(&summary.writer, name.text(), p, result, .{ .on = screen.style.red, .off = screen.style.off }) catch return error.OutOfMemory;
         try app.say(false, "{s}", .{summary.written()});
-        // Show what it made now, and take that as the Profile, as the script does.
+        // Show what it made now, and take that as the Profile, as the script
+        // does: once all of it shows, so `(modified)` stays off.
+        try scanner.settle(changed.made.items, changed.undone.items);
         try app.refresh(scanner);
         try app.becomes(name.text());
     }
@@ -675,8 +692,9 @@ pub const App = struct {
             error.OutOfMemory => return error.OutOfMemory,
         };
         var why: ?[]const u8 = null;
+        var made: std.ArrayList(graph.Ends) = .empty;
         for (ends) |e| {
-            if (try wiring.connect(arena, e)) |reason| why = reason;
+            if (try wiring.connect(arena, e)) |reason| why = reason else try made.append(arena, e);
         }
         if (why) |reason| {
             try app.say(true, "✗ {s} → {s}: {s}", .{ from, to, reason });
@@ -684,6 +702,7 @@ pub const App = struct {
             try app.say(false, "✓ {s} → {s}", .{ from, to });
         }
         // Show the new Connection now, as the script does.
+        try scanner.settle(made.items, &.{});
         try app.refresh(scanner);
     }
 
@@ -742,8 +761,9 @@ pub const App = struct {
         app.replace(fresh);
 
         var all = true;
+        var undone: std.ArrayList(graph.Ends) = .empty;
         for (still.links) |l| {
-            if (!try wiring.disconnect(arena, l.ends)) all = false;
+            if (try wiring.disconnect(arena, l.ends)) try undone.append(arena, l.ends) else all = false;
         }
         const g = app.current.graph;
         const labels = .{ g.endpoints[still.from].label, g.endpoints[still.to].label };
@@ -753,6 +773,7 @@ pub const App = struct {
             try app.say(true, "✗ could not fully disconnect {s} → {s}", labels);
         }
         // Show it gone now, as the script does.
+        try scanner.settle(&.{}, undone.items);
         try app.refresh(scanner);
     }
 };
@@ -767,26 +788,35 @@ fn dupeAll(arena: Allocator, strings: []const []const u8) Allocator.Error![]cons
     return out;
 }
 
+/// The Links a change made and undid, in `arena`.
+const Changed = struct {
+    made: std.ArrayList(graph.Ends) = .empty,
+    undone: std.ArrayList(graph.Ends) = .empty,
+};
+
 /// The TUI's `wiring` as `load.apply` takes it: a Link not made, or not
-/// undone, is `error.ToolFailed`.
+/// undone, is `error.ToolFailed`. Those that are go in `changed`.
 fn Applying(comptime Wiring: type) type {
     return struct {
         arena: Allocator,
         wiring: Wiring,
+        changed: *Changed,
 
         pub fn connect(a: @This(), e: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
             if (try a.wiring.connect(a.arena, e) != null) return error.ToolFailed;
+            try a.changed.made.append(a.arena, e);
         }
 
         pub fn disconnect(a: @This(), e: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
             if (!try a.wiring.disconnect(a.arena, e)) return error.ToolFailed;
+            try a.changed.undone.append(a.arena, e);
         }
     };
 }
 
-/// Runs the TUI until Esc. `scanner.scan(arena)` reads the graph; the first
-/// read happens before the screen is taken over, so its error is the
-/// caller's. `wiring.connect(arena, ends)` makes a Link and returns null, or
+/// Runs the TUI until Esc. `scanner` reads the graph, as the App takes it;
+/// the first read happens before the screen is taken over, so its error is
+/// the caller's. `wiring.connect(arena, ends)` makes a Link and returns null, or
 /// why it could not, allocated in `arena`; `wiring.disconnect(arena, ends)`
 /// undoes one and returns whether it did. Profiles are in `store`.
 pub fn run(gpa: Allocator, io: Io, scanner: anytype, wiring: anytype, store: profile.Store) !void {
@@ -801,21 +831,20 @@ pub fn run(gpa: Allocator, io: Io, scanner: anytype, wiring: anytype, store: pro
     var frame: std.heap.ArenaAllocator = .init(gpa);
     defer frame.deinit();
     var input: term.Input = .{};
-    var next_scan = now(io) + refresh_ms;
+    var next_tick = now(io) + refresh_ms;
     var clear = false;
 
     while (true) {
-        if (app.live() and now(io) >= next_scan) {
-            try app.refresh(scanner);
-            next_scan = now(io) + refresh_ms;
+        if (now(io) >= next_tick) {
+            try app.tick(scanner);
+            next_tick = now(io) + refresh_ms;
         }
         _ = frame.reset(.retain_capacity);
         const size = term.size();
         try draw(&stdout.interface, try app.rows(frame.allocator(), size), size, clear);
         clear = false;
 
-        // While picking, the graph stays as it is: wait for a key.
-        const wait: i32 = if (app.live()) @intCast(std.math.clamp(next_scan - now(io), 0, refresh_ms)) else -1;
+        const wait: i32 = @intCast(std.math.clamp(next_tick - now(io), 0, refresh_ms));
         switch (input.next(wait) catch return) {
             .timeout => {},
             .resize => clear = true,
@@ -823,7 +852,7 @@ pub fn run(gpa: Allocator, io: Io, scanner: anytype, wiring: anytype, store: pro
                 const was_live = app.live();
                 if (try app.key(frame.allocator(), k, size, scanner, wiring) == .quit) return;
                 // Back home: re-read after a full second, as after any other key.
-                if (app.live() and !was_live) next_scan = now(io) + refresh_ms;
+                if (app.live() and !was_live) next_tick = now(io) + refresh_ms;
             },
         }
     }
@@ -889,12 +918,56 @@ const EveryAlloc = struct {
 const FakeScanner = struct {
     graphs: []const ?graph.Graph,
     next: *usize,
+    /// Where every call is written down, if given.
+    log: ?*Log = null,
 
     pub fn scan(s: FakeScanner, arena: Allocator) ScanError!graph.Graph {
         _ = arena;
+        if (s.log) |l| try l.add("scan", .{});
         const i = @min(s.next.*, s.graphs.len - 1);
         s.next.* += 1;
         return s.graphs[i] orelse error.Unreadable;
+    }
+
+    pub fn drain(s: FakeScanner) Allocator.Error!void {
+        if (s.log) |l| try l.add("drain", .{});
+    }
+
+    pub fn settle(s: FakeScanner, made: []const graph.Ends, undone: []const graph.Ends) Allocator.Error!void {
+        if (s.log) |l| try l.add("settle {f} {f}", .{ EndsList{ .sign = '+', .list = made }, EndsList{ .sign = '-', .list = undone } });
+    }
+};
+
+/// The calls to a FakeScanner, one line each.
+const Log = struct {
+    arena: Allocator,
+    lines: std.ArrayList([]const u8) = .empty,
+
+    fn add(l: *Log, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
+        try l.lines.append(l.arena, try std.fmt.allocPrint(l.arena, fmt, args));
+    }
+
+    /// The lines so far, joined by `|`, and forgotten.
+    fn take(l: *Log) Allocator.Error![]const u8 {
+        defer l.lines.clearRetainingCapacity();
+        return std.mem.join(l.arena, "|", l.lines.items);
+    }
+};
+
+/// `+2>6,+3>7` for two PipeWire Links made; `-20:0>21:0` for an ALSA one undone.
+const EndsList = struct {
+    sign: u8,
+    list: []const graph.Ends,
+
+    pub fn format(e: EndsList, w: *Io.Writer) Io.Writer.Error!void {
+        if (e.list.len == 0) return w.writeByte(e.sign);
+        for (e.list, 0..) |ends, i| {
+            if (i > 0) try w.writeByte(',');
+            switch (ends) {
+                .pw => |p| try w.print("{c}{d}>{d}", .{ e.sign, p[0], p[1] }),
+                .alsa => |a| try w.print("{c}{f}>{f}", .{ e.sign, a[0], a[1] }),
+            }
+        }
     }
 };
 
@@ -2394,4 +2467,95 @@ test "App.rows: the Profile screens" {
         try testing.expect(std.mem.find(u8, rows[2], body) != null);
         try testing.expect(std.mem.startsWith(u8, rows[big.rows - 2], menu));
     }
+}
+
+test "Connect, Disconnect and Load wait for the Links they made or undid, then re-read" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    // Only the Links that were made or undone are waited for.
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone, .fail = &.{ .{ .pw = .{ 3, 7 } }, .{ .pw = .{ 3, 5 } } } };
+    var log: Log = .{ .arena = arena };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ rig, rig, rig_phones, rig_phones, rig, rig, rig_phones }, .next = &n, .log = &log };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    try testing.expectEqualStrings("scan", try log.take());
+
+    // Synth → Headphones.
+    for ("1ba") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings("scan|settle +2>6 -|scan", try log.take());
+
+    // Synth → Headphones, undone.
+    for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings("scan|settle + -2>6|scan", try log.take());
+
+    // Synth → Headphones instead of Speakers.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "phones.conf", .data =
+        \\pw:synth:out_FL|pw:phones:in_FL
+        \\pw:synth:out_FR|pw:phones:in_FR
+        \\
+    });
+    for ("4a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings("scan|settle +2>6 -2>4|scan", try log.take());
+    // The Profile is what was read once it settled.
+    try testing.expectEqualStrings("phones", app.home().profile);
+    try testing.expect(!app.home().modified);
+
+    // ALSA Links too: the scanner decides which to wait for.
+    var eps = [_]graph.Endpoint{
+        .{ .label = "Keys", .kind = .midi, .direction = .from, .ports = .{ .alsa = .{ .addr = .{ .client = 20, .port = 0 } } } },
+        .{ .label = "Synth", .kind = .midi, .direction = .to, .ports = .{ .alsa = .{ .addr = .{ .client = 21, .port = 0 } } } },
+    };
+    var m: usize = 0;
+    const midi: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &.{} }}, .next = &m, .log = &log };
+    var midi_app: App = try .init(testing.allocator, midi, no_profiles);
+    defer midi_app.deinit();
+    for ("1aa") |c| _ = try midi_app.key(arena, .{ .char = c }, big, midi, wiring);
+    try testing.expectEqualStrings("scan|scan|settle +20:0>21:0 -|scan", try log.take());
+}
+
+test "tick: re-reads the graph on the home screen; elsewhere, only takes in changes" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var log: Log = .{ .arena = arena };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_unlinked }, .next = &n, .log = &log };
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
+    defer app.deinit();
+    _ = try log.take();
+
+    try app.tick(scanner);
+    try testing.expectEqualStrings("scan", try log.take());
+    try testing.expectEqual(0, app.home().graph.connections.len);
+
+    // Picking: the graph shown stays as it was.
+    _ = try app.key(arena, .{ .char = '2' }, big, scanner, wiring);
+    try app.tick(scanner);
+    try app.tick(scanner);
+    try testing.expectEqualStrings("drain|drain", try log.take());
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try app.tick(scanner);
+    try testing.expectEqualStrings("scan", try log.take());
+}
+
+fn tickAndFail(gpa: Allocator) !void {
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_unlinked }, .next = &n };
+    var app: App = try .init(gpa, scanner, no_profiles);
+    defer app.deinit();
+    try app.tick(scanner);
+    app.mode = .{ .disconnect = .{} };
+    try app.tick(scanner);
+}
+
+test "tick: running out of memory leaks nothing" {
+    try testing.checkAllAllocationFailures(testing.allocator, tickAndFail, .{});
 }

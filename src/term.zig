@@ -13,6 +13,10 @@ const stdout = posix.STDOUT_FILENO;
 /// The terminal settings to go back to; set while the TUI is up.
 var saved: ?posix.termios = null;
 
+/// Run, if set, when Ctrl-C or SIGTERM ends aroute, once the terminal is
+/// back: what else to put back or stop. Must be safe in a signal handler.
+pub var on_interrupt: ?*const fn () void = null;
+
 /// Set by SIGWINCH, cleared by `Input.next` when it reports the resize.
 var resized: std.atomic.Value(bool) = .init(false);
 
@@ -23,7 +27,7 @@ const leave_screen = "\x1b[0m\x1b[?25h\x1b[?1049l";
 /// Switches to the alternate screen with the cursor hidden and input
 /// unbuffered and not echoed, as the script's `stty -echo -icanon min 1
 /// time 0` (so Ctrl-C still interrupts), until `restore`. Ctrl-C and SIGTERM
-/// restore the terminal and exit with 130, as in the script.
+/// restore the terminal, run `on_interrupt`, and exit with 130, as in the script.
 pub fn enter() posix.TermiosGetError!void {
     const original = try posix.tcgetattr(stdin);
     var raw = original;
@@ -67,6 +71,7 @@ fn handle(sig: posix.SIG, handler: *const fn (posix.SIG) callconv(.c) void) void
 
 fn onInterrupt(_: posix.SIG) callconv(.c) void {
     restore();
+    if (on_interrupt) |f| f();
     std.process.exit(130);
 }
 

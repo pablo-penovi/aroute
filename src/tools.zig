@@ -1,10 +1,14 @@
 //! Runs the PipeWire command-line tools (ADR 0001), to read the graph and to
-//! change it. Nothing here interprets what they list; see `pipewire.zig` for
-//! that. ALSA goes through the sequencer directly (`seq.zig`, ADR 0002).
+//! change it, and keeps `pw-dump --monitor` running for the TUI (ADR 0003).
+//! Nothing here interprets what they list; see `pipewire.zig` and
+//! `monitor.zig` for that. ALSA goes through the sequencer directly
+//! (`seq.zig`, ADR 0002).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const posix = std.posix;
+const linux = std.os.linux;
 
 /// The tools aroute runs, checked for at startup.
 pub const Tool = enum {
@@ -50,6 +54,80 @@ pub const Error = error{
 /// The whole PipeWire graph as JSON. Caller owns the result.
 pub fn pwDump(gpa: Allocator, io: Io) Error![]u8 {
     return run(gpa, io, &.{"pw-dump"});
+}
+
+/// The running monitor's pid, for `killMonitor`; 0 if there is none.
+var monitor_pid: std.atomic.Value(posix.pid_t) = .init(0);
+
+/// A running `pw-dump --monitor --no-colors`, whose output is read without
+/// waiting. Only one runs at a time.
+pub const Monitor = struct {
+    child: std.process.Child,
+
+    pub fn start(io: Io) Error!Monitor {
+        const child = std.process.spawn(io, .{
+            .argv = &.{ "pw-dump", "--monitor", "--no-colors" },
+            .stdin = .ignore,
+            .stdout = .pipe,
+            // What it says would land on the TUI's screen.
+            .stderr = .ignore,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.FileNotFound => return error.MissingTool,
+            else => return error.ToolFailed,
+        };
+        const out = child.stdout.?.handle;
+        var flags: linux.O = @bitCast(@as(u32, @truncate(linux.fcntl(out, linux.F.GETFL, 0))));
+        flags.NONBLOCK = true;
+        _ = linux.fcntl(out, linux.F.SETFL, @as(u32, @bitCast(flags)));
+        // Room for a burst of changes while aroute is busy, if it may have it.
+        _ = linux.fcntl(out, linux.F.SETPIPE_SZ, 1 << 20);
+        monitor_pid.store(child.id.?, .release);
+        return .{ .child = child };
+    }
+
+    /// Readable when it has written something, or exited.
+    pub fn fd(m: Monitor) posix.fd_t {
+        return m.child.stdout.?.handle;
+    }
+
+    pub const Read = union(enum) {
+        /// How many bytes were read.
+        bytes: usize,
+        /// Nothing new yet.
+        none,
+        /// It has exited; nothing more will come.
+        exited,
+    };
+
+    /// What it has written since the last read, as much as fits in `buf`.
+    pub fn read(m: Monitor, buf: []u8) Read {
+        const rc = linux.read(m.fd(), buf.ptr, buf.len);
+        return switch (posix.errno(rc)) {
+            .SUCCESS => if (rc == 0) .exited else .{ .bytes = rc },
+            .AGAIN, .INTR => .none,
+            else => .exited,
+        };
+    }
+
+    /// Waits until it writes something or exits, at most `timeout_ms` (-1: no limit).
+    pub fn wait(m: Monitor, timeout_ms: i32) void {
+        var fds = [_]posix.pollfd{.{ .fd = m.fd(), .events = posix.POLL.IN, .revents = 0 }};
+        _ = linux.poll(&fds, fds.len, timeout_ms);
+    }
+
+    /// Kills it, if it is still running, and waits for it to go.
+    pub fn stop(m: *Monitor, io: Io) void {
+        monitor_pid.store(0, .release);
+        m.child.kill(io);
+    }
+};
+
+/// Kills the running monitor, if any, without waiting: for when aroute
+/// ends without going through `Monitor.stop`. Safe in a signal handler.
+pub fn killMonitor() void {
+    const pid = monitor_pid.swap(0, .acq_rel);
+    if (pid != 0) _ = linux.kill(pid, .TERM);
 }
 
 /// The local time as `date '+%F %T'` prints it (`2026-11-01 16:45:00`),
