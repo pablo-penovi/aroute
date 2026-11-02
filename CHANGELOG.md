@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-11-01
+
+### Added
+
+- `2` Disconnect in the TUI: the CONNECTIONS list with a letter on each row, in place of the columns. Picking one removes all of its Links (`pw-link -d` / `aconnect -d`); the status line then says `✓ Disconnected Source → Destination`, or `✗ could not fully disconnect Source → Destination` if a Link could not be removed.
+- When the list doesn't fit, `PgUp`/`PgDn` page through it and the letters go to the new rows, as in Connect; the header shows `CONNECTIONS  2/3` and the menu `PgUp/PgDn Page`.
+- While picking, the graph is not re-read. Just before disconnecting it is, and every Link the Connection has by then is removed; if it is no longer there, the status says `✗ Source → Destination is gone` instead.
+
+### Changed
+
+- Unlike the script, there is no limit of 52 Connections that can be picked.
+
 ## [0.0.7] - 2026-11-01
 
 ### Added
