@@ -4,7 +4,7 @@ The Zig rewrite of the `aroute` bash script. Terms are defined in [GLOSSARY.md](
 
 ## Scope
 
-Full parity with the bash script first: the TUI plus `--list`, `--profiles`, `--save NAME`, `--load NAME [--force]` and `--help`. Profiles (`${XDG_CONFIG_HOME:-~/.config}/aroute/profiles/<name>.conf`) and the `aliases` file keep their exact format, so existing files keep working. Anything not covered below behaves as in the script: menu keys (`Esc`, `1`–`5`), colours, the "(modified)" marker, the 1-second refresh on the home screen, the save prompt and overwrite check, the missing-device confirmation on load, the Delete screen staying open, `AROUTE_SHOW_ALL`, and alias substitution.
+Full parity with the bash script first: the TUI plus `--list`, `--profiles`, `--save NAME`, `--load NAME [--force]` and `--help`. Profiles (`${XDG_CONFIG_HOME:-~/.config}/aroute/profiles/<name>.conf`) and the `aliases` file keep their exact format, so existing files keep working. Anything not covered below behaves as in the script: menu keys (`Esc`, `1`–`5`), colours, the "(modified)" marker, the save prompt and overwrite check, the missing-device confirmation on load, the Delete screen staying open, `AROUTE_SHOW_ALL`, and alias substitution.
 
 The binary replaces `~/.local/bin/aroute`. The original script is kept locally as `legacy/aroute.sh` (git-ignored) as the behavioural reference.
 
@@ -36,7 +36,7 @@ Available only while picking (Connect, Disconnect, Load, Delete), never on the h
 
 ## Graph state
 
-- The graph is re-read every second on the home screen only. While picking, the list is frozen so letters don't move.
+- On the home screen, the graph is re-read as soon as it changes, and not at all while it is still ([ADR 0004](adr/0004-update-the-home-screen-when-the-graph-changes.md)): the TUI waits on the keyboard, `pw-dump --monitor`'s output and the sequencer's announce events together, and re-reads once per wake however many changes came. While picking or answering a prompt, the list is frozen so letters don't move; coming back home re-reads at once if anything changed meanwhile. While `pw-dump` is down, the TUI still wakes once a second to start it again.
 - Just before acting, the graph is re-read and the pick checked; if it is gone, the status shows "✗ … is gone" instead of acting on something else.
 - PipeWire is changed through `pw-link`, and read through `pw-dump` ([ADR 0001](adr/0001-shell-out-to-pipewire-and-alsa-tools.md)): the TUI keeps one `pw-dump --monitor` running and folds the changes it writes into the graph, the command-line commands run `pw-dump` once ([ADR 0003](adr/0003-read-pipewire-in-the-tui-through-pw-dump-monitor.md)). After Connect, Disconnect and Load, the TUI waits until the monitor shows the Links made or undone, at most a second, before re-reading. If `pw-dump` exits, the graph is unreadable until it runs again; it is started again at most once a second. ALSA MIDI is read and changed through the kernel's sequencer interface on `/dev/snd/seq` directly, with the same rules as `aconnect` ([ADR 0002](adr/0002-talk-to-the-alsa-sequencer-through-the-kernel.md)). Reading is kept separate from turning what was read into Endpoints and Connections, which is tested against captured `pw-dump` and `pw-dump --monitor` output and a sequencer listing.
 
@@ -50,6 +50,7 @@ Besides picking and search above, these are deliberate; everything else matches 
 - **Fitting the screen**: nothing wraps. Names, the title, the menu and the profiles directory in the PROFILES header are cut with `…` by display width, so wide characters and combining marks line up. A home screen that doesn't fit scrolls (see Screens) instead of ending in `… N more (enlarge the terminal)`, and so does the missing-Devices screen on Load.
 - **No limit of 52**: every Connection, Profile and pickable Endpoint can be reached by paging.
 - **`Esc` in the second Connect step** goes back to the first step; a second `Esc` goes home.
+- **Updating on change**: the home screen shows a change made elsewhere as soon as it happens, instead of re-reading the graph every second, and does nothing while the graph is still.
 - **Re-reading the graph**: Save re-reads it just before saving, and `y` on the missing-Devices screen re-reads it and plans the load again. If the graph can't be re-read on the home screen, the last one stays up and the status line says `✗ cannot read the PipeWire graph (is PipeWire running?)` until a read works.
 - **After answering a Delete question** the search is cleared, so the status line shows what happened.
 - **Prompts** (Save, the overwrite and Delete questions, `/` search) draw their own reverse-video cursor at the end of the field and keep the terminal's cursor hidden.

@@ -157,6 +157,8 @@ fn parseEscape(bytes: []const u8) Parsed {
 pub const Event = union(enum) {
     key: Key,
     resize,
+    /// One of the other files waited on is readable: the graph may have changed.
+    changed,
     /// Nothing happened before the timeout.
     timeout,
 };
@@ -164,16 +166,22 @@ pub const Event = union(enum) {
 /// How long to wait for the rest of an escape sequence after ESC, as the script.
 const escape_ms = 30;
 
-/// Keys from standard input.
+/// Keys from the terminal.
 pub const Input = struct {
+    /// Where keys come from.
+    fd: posix.fd_t = stdin,
     buf: [64]u8 = undefined,
     start: usize = 0,
     end: usize = 0,
 
     pub const Error = error{EndOfInput};
 
-    /// The next key, a resize, or `.timeout` after `timeout_ms`.
-    pub fn next(in: *Input, timeout_ms: i32) Error!Event {
+    /// The most other files `next` waits on.
+    pub const max_others = 3;
+
+    /// The next key, a resize, `.changed` once one of `others` is readable
+    /// (keys come first), or `.timeout` after `timeout_ms` (-1: no limit).
+    pub fn next(in: *Input, timeout_ms: i32, others: []const posix.fd_t) Error!Event {
         while (true) {
             if (resized.swap(false, .acquire)) return .resize;
             if (in.start < in.end) {
@@ -181,35 +189,40 @@ pub const Input = struct {
                 in.start += k.len;
                 return .{ .key = k.key };
             }
-            switch (wait(timeout_ms)) {
+            switch (wait(in.fd, others, timeout_ms)) {
                 .timeout => return .timeout,
                 // A resize, checked at the top.
                 .interrupted => continue,
-                .ready => {},
+                .other => return .changed,
+                .key => {},
             }
             in.start = 0;
-            in.end = try read(&in.buf);
-            if (in.end == 1 and in.buf[0] == 0x1b and wait(escape_ms) == .ready) {
-                in.end += try read(in.buf[1..]);
+            in.end = try read(in.fd, &in.buf);
+            if (in.end == 1 and in.buf[0] == 0x1b and wait(in.fd, &.{}, escape_ms) == .key) {
+                in.end += try read(in.fd, in.buf[1..]);
             }
         }
     }
 };
 
-fn wait(timeout_ms: i32) enum { ready, timeout, interrupted } {
-    var fds = [_]posix.pollfd{.{ .fd = stdin, .events = posix.POLL.IN, .revents = 0 }};
-    const rc = linux.poll(&fds, fds.len, timeout_ms);
+fn wait(fd: posix.fd_t, others: []const posix.fd_t, timeout_ms: i32) enum { key, other, timeout, interrupted } {
+    std.debug.assert(others.len <= Input.max_others);
+    var fds: [1 + Input.max_others]posix.pollfd = undefined;
+    fds[0] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+    for (others, fds[1..][0..others.len]) |o, *p| p.* = .{ .fd = o, .events = posix.POLL.IN, .revents = 0 };
+    const polled = fds[0 .. 1 + others.len];
+    const rc = linux.poll(polled.ptr, polled.len, timeout_ms);
     return switch (posix.errno(rc)) {
-        .SUCCESS => if (rc == 0) .timeout else .ready,
+        .SUCCESS => if (rc == 0) .timeout else if (fds[0].revents != 0) .key else .other,
         .INTR => .interrupted,
         // Let `read` say what is wrong.
-        else => .ready,
+        else => .key,
     };
 }
 
 /// The terminal is gone when it reads nothing or fails.
-fn read(buf: []u8) Input.Error!usize {
-    const n = posix.read(stdin, buf) catch return error.EndOfInput;
+fn read(fd: posix.fd_t, buf: []u8) Input.Error!usize {
+    const n = posix.read(fd, buf) catch return error.EndOfInput;
     if (n == 0) return error.EndOfInput;
     return n;
 }
@@ -265,4 +278,53 @@ test "parseKey: several keys in a row, as when pasted" {
     }
     try testing.expectEqual(bytes.len, i);
     try testing.expectEqualSlices(Key, &.{ .page_down, .{ .char = 'a' }, .page_up, .enter }, &keys);
+}
+
+fn pipe() ![2]posix.fd_t {
+    var fds: [2]posix.fd_t = undefined;
+    if (posix.errno(linux.pipe2(&fds, .{ .CLOEXEC = true })) != .SUCCESS) return error.PipeFailed;
+    return fds;
+}
+
+fn closeAll(fds: [2]posix.fd_t) void {
+    for (fds) |fd| _ = linux.close(fd);
+}
+
+fn send(fd: posix.fd_t, bytes: []const u8) !void {
+    if (posix.errno(linux.write(fd, bytes.ptr, bytes.len)) != .SUCCESS) return error.WriteFailed;
+}
+
+test "Input: another file readable is a change; keys still arrive, first" {
+    const keys = try pipe();
+    defer closeAll(keys);
+    const graph = try pipe();
+    defer closeAll(graph);
+    var in: Input = .{ .fd = keys[0] };
+    const others = [_]posix.fd_t{graph[0]};
+
+    try testing.expectEqual(Event.timeout, try in.next(0, &others));
+    try send(graph[1], "x");
+    try testing.expectEqual(Event.changed, try in.next(-1, &others));
+    // Until it is read, it stays readable.
+    try testing.expectEqual(Event.changed, try in.next(0, &others));
+
+    try send(keys[1], "a\x1b[6~");
+    try testing.expectEqual(Event{ .key = .{ .char = 'a' } }, try in.next(-1, &others));
+    try testing.expectEqual(Event{ .key = .page_down }, try in.next(-1, &others));
+    try testing.expectEqual(Event.changed, try in.next(-1, &others));
+
+    // Without it, the same as before: only keys.
+    try testing.expectEqual(Event.timeout, try in.next(0, &.{}));
+    try send(keys[1], "\x1b");
+    try testing.expectEqual(Event{ .key = .esc }, try in.next(-1, &.{}));
+    try send(keys[1], "\x1b[5~");
+    try testing.expectEqual(Event{ .key = .page_up }, try in.next(-1, &.{}));
+}
+
+test "Input: a terminal that is gone ends the input" {
+    const keys = try pipe();
+    defer _ = linux.close(keys[0]);
+    _ = linux.close(keys[1]);
+    var in: Input = .{ .fd = keys[0] };
+    try testing.expectError(error.EndOfInput, in.next(-1, &.{}));
 }

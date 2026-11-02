@@ -1,14 +1,17 @@
-//! The interactive TUI, as the script's `tui`: the home screen, re-read
-//! every second; Connect and Disconnect; saving, loading and deleting
-//! Profiles; and `/` search in the pickers (`search.zig`). Drawing is in
-//! `screen.zig`, the terminal in `term.zig`.
+//! The interactive TUI, as the script's `tui`: the home screen, re-read as
+//! soon as the graph changes; Connect and Disconnect; saving, loading and
+//! deleting Profiles; and `/` search in the pickers (`search.zig`). Drawing
+//! is in `screen.zig`, the terminal in `term.zig`.
 //!
 //! The `scanner` the App is given reads the graph: `scanner.scan(arena)`
-//! reads it into `arena`; `scanner.drain()` takes in what changed without
-//! reading it, so a source that streams changes isn't held up while the
-//! graph shown stays as it is; and `scanner.settle(made, undone)` waits,
-//! briefly, until the Links aroute just made show up and those it undid
-//! are gone, so the re-read that follows shows them.
+//! reads it into `arena`; `scanner.changes()` takes in whatever has changed,
+//! without reading the graph, so a source that streams changes isn't held
+//! up, and says whether the graph changed since the last read; and
+//! `scanner.settle(made, undone)` waits, briefly, until the Links aroute just
+//! made show up and those it undid are gone, so the re-read that follows
+//! shows them. For `run`, `scanner.fds(&buf)` also gives the files to wait
+//! on for changes, and `scanner.needsRestart()` whether one of its sources
+//! is down and must be tried again in a while.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -23,8 +26,8 @@ const search = @import("search.zig");
 const screen = @import("screen.zig");
 const term = @import("term.zig");
 
-/// How often the home screen re-reads the graph, as the script's REFRESH.
-const refresh_ms = 1000;
+/// How long to wait before trying a source that is down again.
+const restart_ms = 1000;
 
 pub const ScanError = error{
     /// The graph could not be read, e.g. PipeWire is not running.
@@ -72,6 +75,9 @@ pub const App = struct {
     status_err: bool = false,
     /// The last re-read failed; the graph shown is the one before.
     unreadable: bool = false,
+    /// The graph has changed since it was last read: what is shown is out
+    /// of date until it is read again.
+    stale: bool = false,
     /// The home screen's scroll.
     scroll: usize = 0,
     mode: Mode = .home,
@@ -179,7 +185,7 @@ pub const App = struct {
     /// Re-reads the graph. If it can't be read, the last one stays and the
     /// status line says so until a read works again.
     pub fn refresh(app: *App, scanner: anytype) Allocator.Error!void {
-        const fresh = Scan.read(app.gpa, scanner) catch |err| switch (err) {
+        const fresh = app.read(scanner) catch |err| switch (err) {
             error.Unreadable => {
                 app.unreadable = true;
                 return;
@@ -189,11 +195,18 @@ pub const App = struct {
         app.replace(fresh);
     }
 
-    /// Once a second: re-reads the graph on the home screen. Elsewhere it
-    /// stays as it is, so letters don't move, but changes are still taken in.
-    pub fn tick(app: *App, scanner: anytype) Allocator.Error!void {
-        if (app.live()) return app.refresh(scanner);
-        try scanner.drain();
+    /// Reads the graph, which is then up to date.
+    fn read(app: *App, scanner: anytype) ScanError!Scan {
+        app.stale = false;
+        return Scan.read(app.gpa, scanner);
+    }
+
+    /// The graph may have changed: takes in what did. On the home screen,
+    /// re-reads it if it did, once however many changes came. Elsewhere it
+    /// stays as it is, so letters don't move, until back home.
+    pub fn wake(app: *App, scanner: anytype) Allocator.Error!void {
+        if (try scanner.changes()) app.stale = true;
+        if (app.live() and app.stale) try app.refresh(scanner);
     }
 
     /// Re-reads the graph, as `refresh`; whether it could.
@@ -237,7 +250,7 @@ pub const App = struct {
         app.status_err = err;
     }
 
-    /// Whether the graph is re-read every second: on the home screen only.
+    /// Whether the graph is re-read as it changes: on the home screen only.
     pub fn live(app: App) bool {
         return app.mode == .home;
     }
@@ -386,6 +399,8 @@ pub const App = struct {
             .choose => try app.choosingKey(arena, k, size, scanner, wiring),
             .confirm => try app.confirmKey(arena, k, size, scanner, wiring),
         }
+        // Back home: what changed meanwhile shows at once.
+        if (app.live() and app.stale) try app.refresh(scanner);
         return .stay;
     }
 
@@ -664,7 +679,7 @@ pub const App = struct {
             .{ old.endpoints[a], old.endpoints[b] }
         else
             .{ old.endpoints[b], old.endpoints[a] };
-        const fresh = Scan.read(app.gpa, scanner) catch |err| switch (err) {
+        const fresh = app.read(scanner) catch |err| switch (err) {
             error.Unreadable => {
                 app.unreadable = true;
                 return;
@@ -746,7 +761,7 @@ pub const App = struct {
         const c = old.connections[i];
         const from = old.endpoints[c.from];
         const to = old.endpoints[c.to];
-        const fresh = Scan.read(app.gpa, scanner) catch |err| switch (err) {
+        const fresh = app.read(scanner) catch |err| switch (err) {
             error.Unreadable => {
                 app.unreadable = true;
                 return;
@@ -831,35 +846,23 @@ pub fn run(gpa: Allocator, io: Io, scanner: anytype, wiring: anytype, store: pro
     var frame: std.heap.ArenaAllocator = .init(gpa);
     defer frame.deinit();
     var input: term.Input = .{};
-    var next_tick = now(io) + refresh_ms;
     var clear = false;
 
     while (true) {
-        if (now(io) >= next_tick) {
-            try app.tick(scanner);
-            next_tick = now(io) + refresh_ms;
-        }
         _ = frame.reset(.retain_capacity);
         const size = term.size();
         try draw(&stdout.interface, try app.rows(frame.allocator(), size), size, clear);
         clear = false;
 
-        const wait: i32 = @intCast(std.math.clamp(next_tick - now(io), 0, refresh_ms));
-        switch (input.next(wait) catch return) {
-            .timeout => {},
+        // Nothing to do until a key or a change, unless a source is down.
+        var fds: [term.Input.max_others]std.posix.fd_t = undefined;
+        const timeout: i32 = if (scanner.needsRestart()) restart_ms else -1;
+        switch (input.next(timeout, scanner.fds(&fds)) catch return) {
+            .changed, .timeout => try app.wake(scanner),
             .resize => clear = true,
-            .key => |k| {
-                const was_live = app.live();
-                if (try app.key(frame.allocator(), k, size, scanner, wiring) == .quit) return;
-                // Back home: re-read after a full second, as after any other key.
-                if (app.live() and !was_live) next_tick = now(io) + refresh_ms;
-            },
+            .key => |k| if (try app.key(frame.allocator(), k, size, scanner, wiring) == .quit) return,
         }
     }
-}
-
-fn now(io: Io) i64 {
-    return Io.Clock.awake.now(io).toMilliseconds();
 }
 
 /// Writes every row in place, clearing what is left of it.
@@ -920,17 +923,22 @@ const FakeScanner = struct {
     next: *usize,
     /// Where every call is written down, if given.
     log: ?*Log = null,
+    /// How many changes have come since the last read, if any can.
+    pending: ?*usize = null,
 
     pub fn scan(s: FakeScanner, arena: Allocator) ScanError!graph.Graph {
         _ = arena;
         if (s.log) |l| try l.add("scan", .{});
+        if (s.pending) |p| p.* = 0;
         const i = @min(s.next.*, s.graphs.len - 1);
         s.next.* += 1;
         return s.graphs[i] orelse error.Unreadable;
     }
 
-    pub fn drain(s: FakeScanner) Allocator.Error!void {
-        if (s.log) |l| try l.add("drain", .{});
+    pub fn changes(s: FakeScanner) Allocator.Error!bool {
+        if (s.log) |l| try l.add("changes", .{});
+        const p = s.pending orelse return false;
+        return p.* > 0;
     }
 
     pub fn settle(s: FakeScanner, made: []const graph.Ends, undone: []const graph.Ends) Allocator.Error!void {
@@ -2519,7 +2527,38 @@ test "Connect, Disconnect and Load wait for the Links they made or undid, then r
     try testing.expectEqualStrings("scan|scan|settle +20:0>21:0 -|scan", try log.take());
 }
 
-test "tick: re-reads the graph on the home screen; elsewhere, only takes in changes" {
+test "wake: a change on the home screen re-reads, once however many came" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var log: Log = .{ .arena = arena };
+    var n: usize = 0;
+    var pending: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_unlinked, studio }, .next = &n, .log = &log, .pending = &pending };
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
+    defer app.deinit();
+    _ = try log.take();
+
+    // Nothing changed: nothing read.
+    try app.wake(scanner);
+    try testing.expectEqualStrings("changes", try log.take());
+    try testing.expectEqual(1, app.home().graph.connections.len);
+
+    pending = 1;
+    try app.wake(scanner);
+    try testing.expectEqualStrings("changes|scan", try log.take());
+    try testing.expectEqual(0, app.home().graph.connections.len);
+    try app.wake(scanner);
+    try testing.expectEqualStrings("changes", try log.take());
+
+    // A burst: one read.
+    pending = 30;
+    try app.wake(scanner);
+    try testing.expectEqualStrings("changes|scan", try log.take());
+    try testing.expectEqual(1, app.home().graph.connections.len);
+}
+
+test "wake: picking or asking, the graph stays as it is; back home, it is re-read at once" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -2527,35 +2566,90 @@ test "tick: re-reads the graph on the home screen; elsewhere, only takes in chan
     const wiring: FakeWiring = .{ .made = &made };
     var log: Log = .{ .arena = arena };
     var n: usize = 0;
-    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_unlinked }, .next = &n, .log = &log };
+    var pending: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_unlinked, studio }, .next = &n, .log = &log, .pending = &pending };
     var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
     _ = try log.take();
 
-    try app.tick(scanner);
+    // Picking a Connection to undo.
+    _ = try app.key(arena, .{ .char = '2' }, big, scanner, wiring);
+    pending = 1;
+    try app.wake(scanner);
+    try app.wake(scanner);
+    try testing.expectEqualStrings("changes|changes", try log.take());
+    try testing.expectEqual(1, (try app.disconnectScreen(arena)).shown.len);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
     try testing.expectEqualStrings("scan", try log.take());
     try testing.expectEqual(0, app.home().graph.connections.len);
-
-    // Picking: the graph shown stays as it was.
-    _ = try app.key(arena, .{ .char = '2' }, big, scanner, wiring);
-    try app.tick(scanner);
-    try app.tick(scanner);
-    try testing.expectEqualStrings("drain|drain", try log.take());
+    // Nothing more came: back home again, nothing read.
+    _ = try app.key(arena, .{ .char = '1' }, big, scanner, wiring);
     _ = try app.key(arena, .esc, big, scanner, wiring);
-    try app.tick(scanner);
+    try testing.expectEqualStrings("", try log.take());
+
+    // Typing a name to save as.
+    _ = try app.key(arena, .{ .char = '3' }, big, scanner, wiring);
+    pending = 2;
+    try app.wake(scanner);
+    try testing.expectEqualStrings("changes", try log.take());
+    _ = try app.key(arena, .{ .char = 'x' }, big, scanner, wiring);
+    try testing.expectEqualStrings("", try log.take());
+    _ = try app.key(arena, .esc, big, scanner, wiring);
     try testing.expectEqualStrings("scan", try log.take());
+    try testing.expectEqual(1, app.home().graph.connections.len);
 }
 
-fn tickAndFail(gpa: Allocator) !void {
+test "wake: a source that died says the graph can't be read; once it is back, that clears" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var log: Log = .{ .arena = arena };
     var n: usize = 0;
-    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_unlinked }, .next = &n };
+    var pending: usize = 0;
+    // The monitor dies, can't be started at once, then runs again.
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, null, null, studio_unlinked }, .next = &n, .log = &log, .pending = &pending };
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
+    defer app.deinit();
+    _ = try log.take();
+
+    // Its dying is a change.
+    pending = 1;
+    try app.wake(scanner);
+    try testing.expectEqualStrings(unreadable, app.home().status.text);
+    try testing.expect(app.home().status.err);
+    try testing.expectEqual(1, app.home().graph.connections.len);
+    // While it is down, every wake tries again.
+    pending = 1;
+    try app.wake(scanner);
+    try testing.expectEqualStrings(unreadable, app.home().status.text);
+    pending = 1;
+    try app.wake(scanner);
+    try testing.expectEqualStrings("", app.home().status.text);
+    try testing.expect(!app.home().status.err);
+    try testing.expectEqual(0, app.home().graph.connections.len);
+    try testing.expectEqualStrings("changes|scan|changes|scan|changes|scan", try log.take());
+}
+
+fn wakeAndFail(gpa: Allocator) !void {
+    var n: usize = 0;
+    var pending: usize = 1;
+    const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_unlinked, null, studio }, .next = &n, .pending = &pending };
     var app: App = try .init(gpa, scanner, no_profiles);
     defer app.deinit();
-    try app.tick(scanner);
-    app.mode = .{ .disconnect = .{} };
-    try app.tick(scanner);
+    var made: std.ArrayList(graph.Ends) = .empty;
+    defer made.deinit(gpa);
+    const wiring: FakeWiring = .{ .made = &made };
+    var frame: EveryAlloc = .{ .gpa = gpa };
+    defer frame.deinit();
+    try app.wake(scanner);
+    pending = 1;
+    try app.wake(scanner);
+    _ = try app.key(frame.allocator(), .{ .char = '2' }, big, scanner, wiring);
+    pending = 1;
+    try app.wake(scanner);
+    _ = try app.key(frame.allocator(), .esc, big, scanner, wiring);
 }
 
-test "tick: running out of memory leaks nothing" {
-    try testing.checkAllAllocationFailures(testing.allocator, tickAndFail, .{});
+test "wake: running out of memory leaks nothing" {
+    try testing.checkAllAllocationFailures(testing.allocator, wakeAndFail, .{});
 }

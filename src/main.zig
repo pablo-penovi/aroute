@@ -86,7 +86,9 @@ pub fn main(init: std.process.Init) !void {
         if (!try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) {
             die(io, "the TUI needs a terminal (see --help for non-interactive use)", .{});
         }
-        var live: Live = .{ .source = source, .fold = .init(init.gpa) };
+        // Without the announce port, ALSA changes show at the next re-read.
+        const listening = if (sequencer) |s| !std.meta.isError(s.listen()) else false;
+        var live: Live = .{ .source = source, .fold = .init(init.gpa), .listening = listening };
         defer live.deinit();
         term.on_interrupt = tools.killMonitor;
         tui.run(init.gpa, io, Scanner{ .live = &live }, TuiWiring{ .io = io, .seq = sequencer }, store) catch |err| switch (err) {
@@ -245,14 +247,19 @@ const Source = struct {
 };
 
 /// The PipeWire graph as `pw-dump --monitor` streams it, kept running for
-/// the TUI (ADR 0003). If it exits, the graph can't be read until it is
-/// started again, at most once a second.
+/// the TUI (ADR 0003), and what the sequencer announces (ADR 0004). If
+/// `pw-dump` exits, the graph can't be read until it is started again, at
+/// most once a second.
 const Live = struct {
     source: Source,
     fold: monitor.Fold,
+    /// The sequencer tells of ALSA changes.
+    listening: bool = false,
     process: ?tools.Monitor = null,
     /// When it was last started, on the awake clock, in milliseconds.
     started: ?i64 = null,
+    /// The graph has changed since it was last read.
+    changed: bool = false,
 
     fn deinit(l: *Live) void {
         l.stop();
@@ -271,9 +278,11 @@ const Live = struct {
         const p = l.process orelse return;
         var buf: [64 * 1024]u8 = undefined;
         while (true) switch (p.read(&buf)) {
-            .bytes => |n| _ = l.fold.feed(buf[0..n]) catch |err| switch (err) {
+            .bytes => |n| if (l.fold.feed(buf[0..n]) catch |err| switch (err) {
                 error.InvalidDump => return l.stop(),
                 error.OutOfMemory => return error.OutOfMemory,
+            }) {
+                l.changed = true;
             },
             .none => return,
             .exited => return l.stop(),
@@ -314,13 +323,42 @@ const Scanner = struct {
     pub fn scan(s: Scanner, arena: Allocator) tui.ScanError!graph.Graph {
         const l = s.live;
         try l.ready();
+        // What the sequencer said is about what is listed now.
+        if (l.listening) _ = l.source.seq.?.changed();
+        l.changed = false;
         var g = try pipewire.build(arena, try l.fold.values(arena), try l.source.midi(arena));
         try g.applyAliases(arena, l.source.aliases);
         return g;
     }
 
-    pub fn drain(s: Scanner) Allocator.Error!void {
-        return s.live.drain();
+    /// Takes in what `pw-dump` wrote and the sequencer said; whether the
+    /// graph changed since the last `scan`. It has if `pw-dump` is down.
+    pub fn changes(s: Scanner) Allocator.Error!bool {
+        const l = s.live;
+        try l.drain();
+        if (l.listening and l.source.seq.?.changed()) l.changed = true;
+        return l.changed or l.process == null;
+    }
+
+    /// What to wait on for changes: `pw-dump`'s output and the sequencer,
+    /// if they are there.
+    pub fn fds(s: Scanner, buf: *[term.Input.max_others]std.posix.fd_t) []const std.posix.fd_t {
+        const l = s.live;
+        var n: usize = 0;
+        if (l.process) |p| {
+            buf[n] = p.fd();
+            n += 1;
+        }
+        if (l.listening) {
+            buf[n] = l.source.seq.?.fd;
+            n += 1;
+        }
+        return buf[0..n];
+    }
+
+    /// `pw-dump` is down, to be started again at the next read.
+    pub fn needsRestart(s: Scanner) bool {
+        return s.live.process == null;
     }
 
     /// Waits until the monitor shows the PipeWire Links made and not those

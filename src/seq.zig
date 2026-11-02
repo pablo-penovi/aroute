@@ -1,9 +1,10 @@
 //! The kernel's ALSA sequencer on `/dev/snd/seq`, spoken to directly through
 //! its ioctls (ADR 0002): listing clients, Ports and subscriptions, and making
-//! and undoing Links, as `aconnect` does through libasound. The structures
-//! below are the kernel's, from `<sound/asequencer.h>`; their layouts are
-//! checked at compile time. What the listing means for the graph is up to
-//! `alsa.zig`.
+//! and undoing Links, as `aconnect` does through libasound; and hearing from
+//! the System Announce port when any of them change (ADR 0004). The
+//! structures below are the kernel's, from `<sound/asequencer.h>`; their
+//! layouts are checked at compile time. What the listing means for the graph
+//! is up to `alsa.zig`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -180,8 +181,52 @@ pub const Seq = struct {
         return e;
     }
 
-    /// Creates a Port on this client. Only for tests, standing in for a Device.
-    pub fn createPort(s: Seq, name: []const u8, caps: Caps) !Addr {
+    /// Has the System Announce port tell this client whenever a client or
+    /// Port comes, goes or changes, or a Link is made or undone; `fd` is
+    /// then readable, and `changed` says whether any of it matters. Through
+    /// a Port of its own that only receives: no one can subscribe to it, and
+    /// being no-export, the Midi-Bridge doesn't mirror it, so it is never a
+    /// Device.
+    pub fn listen(s: Seq) error{Unavailable}!void {
+        const port = s.createPort("announce", .{ .write = true, .no_export = true }) catch return error.Unavailable;
+        var sub: PortSubscribe = std.mem.zeroes(PortSubscribe);
+        sub.sender = .{ .client = system_client, .port = system_announce };
+        sub.dest = .{ .client = s.client, .port = @intCast(port.port) };
+        if (control(s.fd, ioc.subscribe_port, &sub) != .SUCCESS) return error.Unavailable;
+    }
+
+    /// Reads every event waiting, and says whether any of them changes the
+    /// graph: whether it has to be listed again. Events lost to a full
+    /// queue count as a change.
+    pub fn changed(s: Seq) bool {
+        return s.changedAbout(null);
+    }
+
+    /// As `changed`, but if `about` is given, only changes about that
+    /// client count: for tests, which share the sequencer with whatever
+    /// else runs.
+    fn changedAbout(s: Seq, about: ?u8) bool {
+        // Room for any event the kernel would hand over: it keeps one that
+        // doesn't fit for the next read, which would then never come.
+        var buf: [64 * 1024]u8 = undefined;
+        var any = false;
+        while (true) {
+            const rc = linux.read(s.fd, &buf, buf.len);
+            switch (linux.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) return any;
+                    if (changes(buf[0..rc], s.client, about)) any = true;
+                },
+                // Its queue overflowed and was emptied.
+                .NOSPC => any = true,
+                else => return any,
+            }
+        }
+    }
+
+    /// Creates a Port on this client: the one `listen` receives on, or in
+    /// tests, one standing in for a Device.
+    pub fn createPort(s: Seq, name: []const u8, caps: Caps) error{CreatePortFailed}!Addr {
         var pi: PortInfo = std.mem.zeroes(PortInfo);
         pi.addr.client = s.client;
         @memcpy(pi.name[0..name.len], name);
@@ -190,7 +235,65 @@ pub const Seq = struct {
         if (control(s.fd, ioc.create_port, &pi) != .SUCCESS) return error.CreatePortFailed;
         return .{ .client = pi.addr.client, .port = pi.addr.port };
     }
+
+    /// Deletes a Port of this client. Only for tests, standing in for a
+    /// Device unplugged.
+    pub fn deletePort(s: Seq, addr: Addr) !void {
+        var pi: PortInfo = std.mem.zeroes(PortInfo);
+        pi.addr = .{ .client = s.client, .port = @intCast(addr.port) };
+        if (control(s.fd, ioc.delete_port, &pi) != .SUCCESS) return error.DeletePortFailed;
+    }
 };
+
+/// The events one read gave, in order. Each is a `snd_seq_event`; a
+/// variable-length one is followed by its data, padded to a whole number of
+/// events. One cut short ends them.
+const Events = struct {
+    rest: []const u8,
+
+    fn next(e: *Events) ?Event {
+        if (e.rest.len < @sizeOf(Event)) return null;
+        const ev = std.mem.bytesToValue(Event, e.rest[0..@sizeOf(Event)]);
+        e.rest = e.rest[@sizeOf(Event)..];
+        if (ev.flags & event_length_mask == event_length_variable) {
+            const len: usize = ev.data.ext_len & ~ext_mask;
+            const padded = (len + @sizeOf(Event) - 1) / @sizeOf(Event) * @sizeOf(Event);
+            if (padded > e.rest.len) {
+                e.rest = "";
+                return null;
+            }
+            e.rest = e.rest[padded..];
+        }
+        return ev;
+    }
+};
+
+/// Whether any of the events read into `bytes` changes the graph as
+/// `client` lists it: a client or Port starting, exiting or changing, or a
+/// Link made or undone. Those about `client` itself don't, since it is
+/// never in its own listing. If `about` is given, only those about that
+/// client count.
+fn changes(bytes: []const u8, client: u8, about: ?u8) bool {
+    var events: Events = .{ .rest = bytes };
+    var any = false;
+    while (events.next()) |ev| {
+        const who = subjects(ev) orelse continue;
+        if (who[0] == client or who[1] == client) continue;
+        if (about) |a| if (who[0] != a and who[1] != a) continue;
+        any = true;
+    }
+    return any;
+}
+
+/// The clients an announce event is about: a client's or Port's, twice,
+/// or a Link's two ends. Null for any other event.
+fn subjects(ev: Event) ?[2]u8 {
+    return switch (ev.type) {
+        event_client_start, event_client_exit, event_client_change, event_port_start, event_port_exit, event_port_change => @splat(ev.data.addr.client),
+        event_port_subscribed, event_port_unsubscribed => .{ ev.data.connect.sender.client, ev.data.connect.dest.client },
+        else => null,
+    };
+}
 
 fn subscription(from: Addr, to: Addr) ?PortSubscribe {
     var sub: PortSubscribe = std.mem.zeroes(PortSubscribe);
@@ -238,6 +341,22 @@ const protocol_version: i32 = 0x10005;
 const query_subs_read: i32 = 0;
 const port_type_midi_generic: u32 = 1 << 1;
 const port_type_application: u32 = 1 << 20;
+const system_client: u8 = 0;
+const system_announce: u8 = 1;
+
+const event_client_start: u8 = 60;
+const event_client_exit: u8 = 61;
+const event_client_change: u8 = 62;
+const event_port_start: u8 = 63;
+const event_port_exit: u8 = 64;
+const event_port_change: u8 = 65;
+const event_port_subscribed: u8 = 66;
+const event_port_unsubscribed: u8 = 67;
+const event_sysex: u8 = 130;
+const event_length_variable: u8 = 1 << 2;
+const event_length_mask: u8 = 3 << 2;
+/// The flag bits of a variable-length event's `len`.
+const ext_mask: u32 = 0xc0000000;
 
 const KAddr = extern struct {
     client: u8,
@@ -299,6 +418,31 @@ const PortSubscribe = extern struct {
     reserved: [64]u8,
 };
 
+const Connect = extern struct {
+    sender: KAddr,
+    dest: KAddr,
+};
+
+/// `snd_seq_event`, as a legacy MIDI 1.0 client reads it.
+const Event = extern struct {
+    type: u8,
+    flags: u8,
+    tag: u8,
+    queue: u8,
+    time: [2]u32,
+    source: KAddr,
+    dest: KAddr,
+    data: extern union {
+        /// The client or Port a client or Port event is about.
+        addr: KAddr,
+        /// The Link a subscription event is about.
+        connect: Connect,
+        /// A variable-length event's data length, with flags in its top bits.
+        ext_len: u32,
+        raw: [3]u32,
+    },
+};
+
 const ioc = struct {
     const IOR = linux.IOCTL.IOR;
     const IOW = linux.IOCTL.IOW;
@@ -309,6 +453,7 @@ const ioc = struct {
     const get_client_info = IOWR('S', 0x10, ClientInfo);
     const set_client_info = IOW('S', 0x11, ClientInfo);
     const create_port = IOWR('S', 0x20, PortInfo);
+    const delete_port = IOW('S', 0x21, PortInfo);
     const subscribe_port = IOW('S', 0x30, PortSubscribe);
     const unsubscribe_port = IOW('S', 0x31, PortSubscribe);
     const query_subs = IOWR('S', 0x4f, QuerySubs);
@@ -336,12 +481,14 @@ comptime {
     }
     expectLayout(QuerySubs, 88, .{ .root = 0, .type = 4, .index = 8, .num_subs = 12, .addr = 16, .queue = 18, .flags = 20, .reserved = 24 });
     expectLayout(PortSubscribe, 80, .{ .sender = 0, .dest = 2, .voices = 4, .flags = 8, .queue = 12, .reserved = 16 });
+    expectLayout(Event, 28, .{ .type = 0, .flags = 1, .tag = 2, .queue = 3, .time = 4, .source = 12, .dest = 14, .data = 16 });
 
     expectRequest(ioc.client_id, 0x80045301);
     expectRequest(ioc.user_pversion, 0x40045304);
     expectRequest(ioc.get_client_info, 0xc0bc5310);
     expectRequest(ioc.set_client_info, 0x40bc5311);
     expectRequest(ioc.create_port, if (p64) 0xc0a85320 else 0xc0a45320);
+    expectRequest(ioc.delete_port, if (p64) 0x40a85321 else 0x40a45321);
     expectRequest(ioc.subscribe_port, 0x40505330);
     expectRequest(ioc.unsubscribe_port, 0x40505331);
     expectRequest(ioc.query_subs, 0xc058534f);
@@ -477,4 +624,209 @@ test "kernel: a Link that can't be made says why, as aconnect did" {
     try testing.expectEqualStrings("Connection failed (Invalid argument)", (try s.connect(arena, a, .{ .client = 999, .port = 0 })).?);
     try testing.expect(!s.disconnect(a, .{ .client = 999, .port = 0 }));
     try testing.expectError(error.OutOfMemory, s.connect(testing.failing_allocator, a, read_only));
+}
+
+/// An event as the kernel hands it over, `data` its first bytes.
+fn event(@"type": u8, data: []const u8) Event {
+    var ev: Event = std.mem.zeroes(Event);
+    ev.type = @"type";
+    ev.source = .{ .client = system_client, .port = system_announce };
+    @memcpy(std.mem.asBytes(&ev.data)[0..data.len], data);
+    return ev;
+}
+
+/// A variable-length event of `len` bytes, its top flag bits as given.
+fn variable(@"type": u8, len: u32) Event {
+    var ev = event(@"type", &.{});
+    ev.flags = event_length_variable;
+    ev.data.ext_len = len;
+    return ev;
+}
+
+/// `events` and the data after them, as one read would give them.
+fn bytesOf(arena: Allocator, parts: []const []const u8) ![]u8 {
+    return std.mem.concat(arena, u8, parts);
+}
+
+test "changes: announce events change the graph; others don't" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const me: u8 = 129;
+
+    // Client 130 Port 0, and a Link from 130:0 to 20:0.
+    for ([_]Event{
+        event(event_client_start, &.{ 130, 0 }),
+        event(event_client_exit, &.{ 130, 0 }),
+        event(event_client_change, &.{ 130, 0 }),
+        event(event_port_start, &.{ 130, 0 }),
+        event(event_port_exit, &.{ 130, 0 }),
+        event(event_port_change, &.{ 130, 0 }),
+        event(event_port_subscribed, &.{ 130, 0, 20, 0 }),
+        event(event_port_unsubscribed, &.{ 130, 0, 20, 0 }),
+    }) |ev| try testing.expect(changes(std.mem.asBytes(&ev), me, null));
+
+    // A note-on, and aroute's own client, Port and Links.
+    for ([_]Event{
+        event(6, &.{ 0, 60, 100 }),
+        event(event_client_change, &.{ me, 0 }),
+        event(event_port_start, &.{ me, 0 }),
+        event(event_port_subscribed, &.{ 0, 1, me, 0 }),
+        event(event_port_unsubscribed, &.{ me, 0, 20, 0 }),
+    }) |ev| try testing.expect(!changes(std.mem.asBytes(&ev), me, null));
+
+    try testing.expect(!changes("", me, null));
+    // A note-on, then a Port starting.
+    const note = event(6, &.{ 0, 60, 100 });
+    const start = event(event_port_start, &.{ 130, 0 });
+    try testing.expect(changes(try bytesOf(arena, &.{ std.mem.asBytes(&note), std.mem.asBytes(&start) }), me, null));
+    // Cut short: the second event isn't whole.
+    try testing.expect(!changes(try bytesOf(arena, &.{ std.mem.asBytes(&note), std.mem.asBytes(&start)[0..20] }), me, null));
+}
+
+test "changes: a variable-length event is stepped over, data and padding" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const me: u8 = 129;
+    const start = event(event_port_start, &.{ 130, 0 });
+    const note = event(6, &.{ 0, 60, 100 });
+
+    // SysEx whose data reads as a Port starting: it must not be taken for one.
+    const sysex = variable(event_sysex, @sizeOf(Event));
+    try testing.expect(!changes(try bytesOf(arena, &.{ std.mem.asBytes(&sysex), std.mem.asBytes(&start), std.mem.asBytes(&note) }), me, null));
+
+    // 5 bytes of data, padded to a whole event, then a Link undone.
+    const unsub = event(event_port_unsubscribed, &.{ 130, 0, 20, 0 });
+    const short = variable(event_sysex, 5);
+    const data: [28]u8 = .{ 0xf0, 0x7e, 0x7f, 0x06, 0xf7 } ++ @as([23]u8, @splat(0));
+    try testing.expect(changes(try bytesOf(arena, &.{ std.mem.asBytes(&short), &data, std.mem.asBytes(&unsub) }), me, null));
+    // With the length's flag bits set, the same.
+    const flagged = variable(event_sysex, 5 | 0x80000000);
+    try testing.expect(changes(try bytesOf(arena, &.{ std.mem.asBytes(&flagged), &data, std.mem.asBytes(&unsub) }), me, null));
+
+    // A Port starting, then SysEx cut short: what came before still counts.
+    try testing.expect(changes(try bytesOf(arena, &.{ std.mem.asBytes(&start), std.mem.asBytes(&short), data[0..10] }), me, null));
+}
+
+test "changes: only those about a client, if asked" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const me: u8 = 129;
+    const start = event(event_port_start, &.{ 130, 0 });
+    const link = event(event_port_subscribed, &.{ 131, 0, 130, 0 });
+    try testing.expect(changes(std.mem.asBytes(&start), me, 130));
+    try testing.expect(!changes(std.mem.asBytes(&start), me, 131));
+    try testing.expect(changes(std.mem.asBytes(&link), me, 130));
+    try testing.expect(changes(std.mem.asBytes(&link), me, 131));
+    try testing.expect(!changes(try bytesOf(arena, &.{ std.mem.asBytes(&start), std.mem.asBytes(&link) }), me, 132));
+}
+
+/// Sends `ev` to `to`, straight from `from`'s client, with `data` after it.
+fn send(from: Seq, to: Addr, ev: Event, data: []const u8) !void {
+    var e = ev;
+    e.source = .{ .client = from.client, .port = 0 };
+    e.dest = .{ .client = @intCast(to.client), .port = @intCast(to.port) };
+    e.queue = queue_direct;
+    var buf: [256]u8 = undefined;
+    @memcpy(buf[0..@sizeOf(Event)], std.mem.asBytes(&e));
+    @memcpy(buf[@sizeOf(Event)..][0..data.len], data);
+    const n = @sizeOf(Event) + data.len;
+    if (linux.errno(linux.write(from.fd, &buf, n)) != .SUCCESS) return error.SendFailed;
+}
+
+const queue_direct: u8 = 253;
+
+/// The Port `listen` made on `s`, as `other` lists it.
+fn announcePort(s: Seq, other: Seq, arena: Allocator) !Port {
+    for ((try other.list(arena)).ports) |p| if (p.addr.client == s.client) return p;
+    return error.NoAnnouncePort;
+}
+
+// The sequencer is shared with whatever else runs, other tests included, so
+// these count only the changes about their own test client.
+test "kernel: what the announce port says arrives as graph changes" {
+    const s = try openOrSkip("aroute");
+    defer s.close();
+    try s.listen();
+    // The kernel tells of the Link from 0:1 to aroute's Port; being
+    // aroute's own, it isn't a change.
+    var buf: [4096]u8 = undefined;
+    const rc = linux.read(s.fd, &buf, buf.len);
+    try testing.expectEqual(.SUCCESS, linux.errno(rc));
+    var events: Events = .{ .rest = buf[0..rc] };
+    const own = while (events.next()) |ev| {
+        if (ev.type == event_port_subscribed and ev.data.connect.dest.client == s.client) break ev;
+    } else return error.NoOwnSubscription;
+    try testing.expectEqual(KAddr{ .client = system_client, .port = system_announce }, own.data.connect.sender);
+    try testing.expect(!changes(std.mem.asBytes(&own), s.client, null));
+
+    const device = try openOrSkip("aroute test device");
+    try testing.expect(s.changedAbout(device.client));
+    const a = try device.createPort("test port A", all_caps);
+    try testing.expect(s.changedAbout(device.client));
+    const b = try device.createPort("test port B", all_caps);
+    try testing.expect(s.changedAbout(device.client));
+    try testing.expect(!s.changedAbout(device.client));
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqual(null, try s.connect(arena, a, b));
+    try testing.expect(s.changedAbout(device.client));
+    try testing.expect(s.disconnect(a, b));
+    try testing.expect(s.changedAbout(device.client));
+    try device.deletePort(b);
+    try testing.expect(s.changedAbout(device.client));
+    try testing.expect(!s.changedAbout(device.client));
+
+    // SysEx sent straight to aroute's Port is read past, and nothing else.
+    const port = (try announcePort(s, device, arena)).addr;
+    try send(device, port, variable(event_sysex, 5), &.{ 0xf0, 0x7e, 0x7f, 0x06, 0xf7 });
+    try testing.expect(!s.changedAbout(device.client));
+    try send(device, port, variable(event_sysex, 5), &.{ 0xf0, 0x7e, 0x7f, 0x06, 0xf7 });
+    try device.deletePort(a);
+    try testing.expect(s.changedAbout(device.client));
+
+    device.close();
+    try testing.expect(s.changedAbout(device.client));
+    try testing.expect(!s.changedAbout(device.client));
+}
+
+test "kernel: aroute's announce Port is no one's to wire" {
+    const s = try openOrSkip("aroute");
+    defer s.close();
+    try s.listen();
+    const other = try openOrSkip("aroute test device");
+    defer other.close();
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Not in aroute's own listing.
+    for ((try s.list(arena)).ports) |p| try testing.expect(p.addr.client != s.client);
+    // Another client sees it, but it only receives, and is no-export.
+    const port = try announcePort(s, other, arena);
+    try testing.expectEqual(Caps{ .write = true, .no_export = true }, port.caps);
+    const a = try other.createPort("test port A", all_caps);
+    try testing.expect((try other.connect(arena, a, port.addr)) != null);
+}
+
+test "kernel: events lost to a full queue count as a change" {
+    const s = try openOrSkip("aroute");
+    defer s.close();
+    try s.listen();
+    const device = try openOrSkip("aroute test device");
+    defer device.close();
+    _ = try device.createPort("test port A", all_caps);
+    try testing.expect(s.changedAbout(device.client));
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const port = (try announcePort(s, device, arena_state.allocator())).addr;
+    // Note-ons, more than aroute's queue holds, none of them a change.
+    for (0..1000) |_| send(device, port, event(6, &.{ 0, 60, 100 }), &.{}) catch {};
+    try testing.expect(s.changedAbout(device.client));
+    try testing.expect(!s.changedAbout(device.client));
 }
