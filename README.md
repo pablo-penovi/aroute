@@ -7,7 +7,7 @@ A two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI, written in 
 
 Sources go on the left (FROM), Destinations on the right (TO). Connect, disconnect, and save the whole set of connections as a profile you can load later. Audio is routed with `pw-link`; MIDI between two ALSA sequencer ports uses `aconnect`, and MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes through PipeWire's Midi-Bridge.
 
-> **Status:** in progress. `--list`, `--profiles`, `--save` and `--load` work as in the script. The TUI shows the home screen, re-read every second, and can connect; disconnecting and the Profile screens are not done yet. This is a rewrite of a bash script of the same name; see [docs/design.md](docs/design.md) for what is planned.
+> **Status:** in progress. `--list`, `--profiles`, `--save` and `--load` work as in the script. The TUI shows the home screen, re-read every second, and can connect and disconnect; the Profile screens are not done yet. This is a rewrite of a bash script of the same name; see [docs/design.md](docs/design.md) for what is planned.
 
 ## Usage
 

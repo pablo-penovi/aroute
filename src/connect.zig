@@ -1,6 +1,7 @@
 //! Making a Connection, as the script's `valid_pair`, `has_partner`,
 //! `map_channels` and `connect_eps`: which Endpoints can be connected, and
-//! which Links connect them.
+//! which Links connect them; and finding Endpoints and Connections again in
+//! another read of the graph.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -37,10 +38,10 @@ pub fn hasPartner(g: Graph, ep: usize) bool {
 }
 
 /// `ep` in another read of the graph: the Endpoint with the same label, Kind,
-/// direction and Ports. Null if it is gone.
+/// direction, Ports and hiddenness. Null if it is gone.
 pub fn find(g: Graph, ep: Endpoint) ?usize {
     for (g.endpoints, 0..) |o, i| {
-        if (o.hidden or o.kind != ep.kind or o.direction != ep.direction) continue;
+        if (o.hidden != ep.hidden or o.kind != ep.kind or o.direction != ep.direction) continue;
         if (!std.mem.eql(u8, o.label, ep.label)) continue;
         const same = switch (ep.ports) {
             .pw => |p| o.ports == .pw and std.mem.eql(u32, o.ports.pw, p),
@@ -49,6 +50,12 @@ pub fn find(g: Graph, ep: Endpoint) ?usize {
         if (same) return i;
     }
     return null;
+}
+
+/// The Connection from `from` to `to` in another read of the graph, both
+/// found as by `find`. Null if either is gone, or they are no longer connected.
+pub fn findConnection(g: Graph, from: Endpoint, to: Endpoint) ?graph.Connection {
+    return g.connection(find(g, from) orelse return null, find(g, to) orelse return null);
 }
 
 pub const Error = error{
@@ -212,6 +219,34 @@ test "find: the same Endpoint in another read, or null if it is gone" {
     try testing.expectEqual(null, find(g, pw("Mic 2", .audio, .from, &.{1})));
     try testing.expectEqual(null, find(g, pw("Mic", .audio, .to, &.{1})));
     try testing.expectEqual(null, find(g, pair_eps[6]));
+}
+
+test "find: a hidden Endpoint only as a hidden one" {
+    var monitor = pw("Speakers · monitor", .audio, .from, &.{ 8, 9 });
+    monitor.hidden = true;
+    var eps = [_]Endpoint{ pair_eps[8], monitor };
+    const g: Graph = .{ .endpoints = &eps, .connections = &.{} };
+    try testing.expectEqual(1, find(g, monitor));
+    try testing.expectEqual(0, find(g, pair_eps[8]));
+}
+
+test "findConnection: the same Connection in another read, with its Links then" {
+    const links_then = [_]graph.Link{.{ .ends = .{ .pw = .{ 11, 14 } }, .from_name = "pw:mic:out", .to_name = "pw:hp:in_FL" }};
+    // The same Endpoints as in `pair_eps`, at other indexes.
+    var eps = [_]Endpoint{ pair_eps[2], pair_eps[1], pair_eps[0] };
+    const g: Graph = .{ .endpoints = &eps, .connections = &.{
+        .{ .from = 2, .to = 1, .links = &.{} },
+        .{ .from = 2, .to = 0, .links = &links_then },
+    } };
+    try testing.expectEqual(&links_then, findConnection(g, pair_eps[0], pair_eps[2]).?.links.ptr);
+    try testing.expectEqual(1, findConnection(g, pair_eps[0], pair_eps[1]).?.to);
+    // Not connected any more.
+    var unlinked = g;
+    unlinked.connections = g.connections[0..1];
+    try testing.expectEqual(null, findConnection(unlinked, pair_eps[0], pair_eps[2]));
+    // One side gone.
+    try testing.expectEqual(null, findConnection(g, pw("Mic 2", .audio, .from, &.{1}), pair_eps[1]));
+    try testing.expectEqual(null, findConnection(g, pair_eps[0], pw("Speakers", .audio, .to, &.{ 2, 9 })));
 }
 
 /// A graph whose PipeWire Ports have these channel positions, by id.

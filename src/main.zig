@@ -160,6 +160,19 @@ const TuiWiring = struct {
         };
         return null;
     }
+
+    /// Undoes a Link; whether it did.
+    pub fn disconnect(w: TuiWiring, arena: Allocator, ends: graph.Ends) Allocator.Error!bool {
+        tools.disconnect(arena, w.io, ends) catch |err| switch (err) {
+            error.MissingTool => die(w.io, "missing dependency: {s}", .{switch (ends) {
+                .pw => "pw-link",
+                .alsa => "aconnect",
+            }}),
+            error.ToolFailed => return false,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return true;
+    }
 };
 
 /// Local time as the script writes it (`date '+%F %T'`); empty, as in the
