@@ -633,6 +633,9 @@ fn cell(arena: Allocator, ep: ?graph.Endpoint, w: usize, look: Look) Error![]con
         try l.text(style.kind(e.kind));
         try l.text("● ");
         try l.text(e.label);
+        // As in the script, the padding is inside the style, so the first
+        // pick's reverse video spans the whole cell.
+        try l.pad();
         try l.text(style.off);
     }
     try l.pad();
@@ -993,7 +996,8 @@ test "connect: the first pick in reverse video, on its page of the other column"
         "",
         "  3 connections",
     }, p[2..6]);
-    try testing.expect(std.mem.find(u8, rows[3], style.reverse ++ style.midi ++ "● Clipper") != null);
+    // As in the script, the reverse video spans the cell, padding included.
+    try testing.expect(std.mem.find(u8, rows[3], style.reverse ++ style.midi ++ "● Clipper MIDI 2     " ++ style.off) != null);
     try testing.expectEqualStrings("Connect → Clipper MIDI 2: pick what feeds it   / …", p[8]);
 
     const from: Connect = .{ .graph = fixture, .profile = "default", .modified = false, .focus = .to, .from = try column(arena, fixture, .from), .to = &.{ 1, 5 }, .pick = 0 };

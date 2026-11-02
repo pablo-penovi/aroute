@@ -40,6 +40,19 @@ Available only while picking (Connect, Disconnect, Load, Delete), never on the h
 - Just before acting, the graph is re-read and the pick checked; if it is gone, the status shows "✗ … is gone" instead of acting on something else.
 - The graph is read and changed through `pw-dump`, `pw-link` and `aconnect` ([ADR 0001](adr/0001-shell-out-to-pipewire-and-alsa-tools.md)). Running the tools is kept separate from turning their output into Endpoints and Connections, which is tested against captured `pw-dump`/`aconnect` output.
 
+## Other differences from the script
+
+Besides picking and search above, these are deliberate; everything else matches the script.
+
+- **`--list`** indents every snapshot line (the script indents only the first) and exits 0 when there are no Connections.
+- **`--save`** with no Connections saves an empty Profile, says `Saved …` and exits 0 (the script writes it too, but exits 1 without a word). **`--profiles`** also lists names starting with `.`.
+- **Fitting the screen**: nothing wraps. Names, the title, the menu and the profiles directory in the PROFILES header are cut with `…` by display width, so wide characters and combining marks line up. A home screen that doesn't fit scrolls (see Screens) instead of ending in `… N more (enlarge the terminal)`, and so does the missing-Devices screen on Load.
+- **No limit of 52**: every Connection, Profile and pickable Endpoint can be reached by paging.
+- **`Esc` in the second Connect step** goes back to the first step; a second `Esc` goes home.
+- **Re-reading the graph**: Save re-reads it just before saving, and `y` on the missing-Devices screen re-reads it and plans the load again. If the graph can't be re-read on the home screen, the last one stays up and the status line says `✗ cannot read the PipeWire graph (is PipeWire running?)` until a read works.
+- **After answering a Delete question** the search is cleared, so the status line shows what happened.
+- **Prompts** (Save, the overwrite and Delete questions, `/` search) draw their own reverse-video cursor at the end of the field and keep the terminal's cursor hidden.
+
 ## Build
 
 A standard `zig build` project requiring Zig 0.17, with no third-party dependencies (terminal handling is hand-written). Install with:
