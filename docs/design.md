@@ -21,9 +21,9 @@ The script assigns `a`–`z`, `A`–`Z` to every pickable item. Past 52 items, r
 
 Available only while picking (Connect, Disconnect, Load, Delete), never on the home screen.
 
-- `/` opens a search field. Every key narrows the focused list live and the letters are reassigned from page 1, as if paging.
+- `/` opens a search field on the status line (`/mini out`). Every key narrows the focused list live and the letters are reassigned from page 1, as if paging.
 - Matching ignores case, matches anywhere in the displayed name (after aliases), and treats several words as all required: `mini out` matches "MiniFuse 1 Main Output L/R".
-- On Disconnect it matches either side of a Connection; on Load/Delete it matches the profile name.
+- On Disconnect each word can match either side of a Connection; on Load/Delete it matches the profile name.
 - `Enter` stops typing and keeps the filter, so letters pick again; with exactly one match, `Enter` picks it.
 - `Esc` while typing cancels the search. With a filter active, `Esc` clears it; a second `Esc` goes back.
 - `Backspace` on an empty field closes it. No matches shows `(no matches)`.
