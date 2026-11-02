@@ -17,6 +17,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const graph = @import("graph.zig");
+const picker = @import("picker.zig");
 const text = @import("text.zig");
 
 pub const style = struct {
@@ -25,6 +26,8 @@ pub const style = struct {
     pub const bold = "\x1b[1m";
     pub const dim = "\x1b[2m";
     pub const red = "\x1b[31m";
+    pub const cyan = "\x1b[36m";
+    pub const reverse = "\x1b[7m";
     pub const off = "\x1b[0m";
 
     pub fn kind(k: graph.Kind) []const u8 {
@@ -223,31 +226,143 @@ pub fn pageUp(total: usize, height: usize, scroll: usize) usize {
 /// The home body: the FROM and TO columns, then the Connections.
 pub fn homeBody(arena: Allocator, g: graph.Graph, cols: usize) Error![]const []const u8 {
     var lines: std.ArrayList([]const u8) = .empty;
-    var sources: std.ArrayList(graph.Endpoint) = .empty;
-    var destinations: std.ArrayList(graph.Endpoint) = .empty;
-    for ([_]graph.Kind{ .audio, .midi }) |kind| {
-        for (g.endpoints) |ep| {
-            if (ep.hidden or ep.kind != kind) continue;
-            try (if (ep.direction == .from) &sources else &destinations).append(arena, ep);
-        }
-    }
+    const sources = try column(arena, g, .from);
+    const destinations = try column(arena, g, .to);
 
     const w = columnWidth(cols);
     try lines.append(arena, try row(arena, cols, try header(arena, "  FROM", w), try header(arena, "  TO", w)));
-    if (sources.items.len == 0 and destinations.items.len == 0) {
+    if (sources.len == 0 and destinations.len == 0) {
         try lines.append(arena, dimLine("(no devices found)"));
     }
-    for (0..@max(sources.items.len, destinations.items.len)) |i| {
+    for (0..@max(sources.len, destinations.len)) |i| {
         try lines.append(arena, try row(
             arena,
             cols,
-            try cell(arena, if (i < sources.items.len) sources.items[i] else null, w),
-            try cell(arena, if (i < destinations.items.len) destinations.items[i] else null, w),
+            try cell(arena, if (i < sources.len) g.endpoints[sources[i]] else null, w, .plain),
+            try cell(arena, if (i < destinations.len) g.endpoints[destinations[i]] else null, w, .plain),
         ));
     }
     try lines.append(arena, "");
     try lines.appendSlice(arena, try connections(arena, g, cols));
     return lines.items;
+}
+
+/// The Endpoints shown in the FROM or TO column, as indexes into
+/// `g.endpoints`: audio before MIDI, hidden ones left out.
+pub fn column(arena: Allocator, g: graph.Graph, direction: graph.Direction) Allocator.Error![]const usize {
+    var list: std.ArrayList(usize) = .empty;
+    for ([_]graph.Kind{ .audio, .midi }) |kind| {
+        for (g.endpoints, 0..) |ep, i| {
+            if (!ep.hidden and ep.kind == kind and ep.direction == direction) try list.append(arena, i);
+        }
+    }
+    return list.items;
+}
+
+/// Picking Endpoints to connect: the columns get the whole body, and the
+/// Connections are summed up in one line.
+pub const Connect = struct {
+    graph: graph.Graph,
+    profile: []const u8,
+    modified: bool,
+    status: Status = .{},
+    /// The column with the letters; the other is dimmed.
+    focus: graph.Direction,
+    /// Indexes into `graph.endpoints`, top to bottom. In the focused column
+    /// only the Endpoints that can be picked; in the other, all of them.
+    from: []const usize,
+    to: []const usize,
+    /// The focused column's page.
+    page: usize = 0,
+    /// The first pick, shown in reverse video; null until there is one.
+    pick: ?usize = null,
+
+    fn list(c: Connect, direction: graph.Direction) []const usize {
+        return if (direction == .from) c.from else c.to;
+    }
+};
+
+/// Rows each column gets on the Connect screen: the body less the column
+/// header, the blank line and the summary.
+pub fn pickRows(size: Size) usize {
+    return bodyRows(size) -| 3;
+}
+
+/// The Connect screen, one string per row.
+pub fn connect(arena: Allocator, c: Connect, size: Size) Error![]const []const u8 {
+    const rows = pickRows(size);
+    const w = columnWidth(size.cols);
+    const unfocused: graph.Direction = if (c.focus == .from) .to else .from;
+    const focused_pages: picker.Pages = .init(c.list(c.focus).len, rows);
+    const other_pages: picker.Pages = .init(c.list(unfocused).len, rows);
+    // The other column shows the page with the first pick on it.
+    const other_page = if (c.pick) |p| (if (std.mem.findScalar(usize, c.list(unfocused), p)) |i| other_pages.pageOf(i) else 0) else 0;
+    const shown = [2]picker.Pages.Slice{ focused_pages.slice(c.page), other_pages.slice(other_page) };
+
+    var lines: std.ArrayList([]const u8) = .empty;
+    var headers: [2][]const u8 = undefined;
+    for ([_]graph.Direction{ .from, .to }, &headers) |d, *h| {
+        const name = if (d == .from) "  FROM" else "  TO";
+        h.* = try header(arena, if (d == c.focus and focused_pages.count() > 1)
+            try std.fmt.allocPrint(arena, "{s}  {d}/{d}", .{ name, focused_pages.clamp(c.page) + 1, focused_pages.count() })
+        else
+            name, w);
+    }
+    try lines.append(arena, try row(arena, size.cols, headers[0], headers[1]));
+
+    const nothing = shown[0].len == 0;
+    const count = @min(rows, @max(shown[0].len, shown[1].len, @intFromBool(nothing)));
+    for (0..count) |i| {
+        var cells: [2][]const u8 = undefined;
+        for ([_]graph.Direction{ .from, .to }, &cells) |d, *cl| {
+            const focused = d == c.focus;
+            const s = if (focused) shown[0] else shown[1];
+            if (focused and nothing and i == 0) {
+                cl.* = try cell(arena, null, w, .{ .note = "(nothing to connect)" });
+                continue;
+            }
+            if (i >= s.len) {
+                cl.* = try cell(arena, null, w, .plain);
+                continue;
+            }
+            const ep = c.list(d)[s.start + i];
+            const look: Look = if (focused) .{ .letter = picker.letter(i) } else if (c.pick == ep) .selected else .dim;
+            cl.* = try cell(arena, c.graph.endpoints[ep], w, look);
+        }
+        try lines.append(arena, try row(arena, size.cols, cells[0], cells[1]));
+    }
+    try lines.append(arena, "");
+    const n = c.graph.connections.len;
+    try lines.append(arena, try std.fmt.allocPrint(arena, "  " ++ style.dim ++ "{s}" ++ style.off, .{switch (n) {
+        0 => "no connections",
+        1 => "1 connection",
+        else => try std.fmt.allocPrint(arena, "{d} connections", .{n}),
+    }}));
+
+    return frame(arena, .{
+        .title = try title(arena, c.profile, c.modified, size.cols),
+        .body = lines.items,
+        .scroll = 0,
+        .menu = try connectMenu(arena, c, focused_pages.count() > 1),
+        .status = c.status,
+    }, size);
+}
+
+fn connectMenu(arena: Allocator, c: Connect, paged: bool) Error![]const u8 {
+    var out: Writer.Allocating = .init(arena);
+    const w = &out.writer;
+    if (c.pick) |p| {
+        const label = c.graph.endpoints[p].label;
+        if (c.graph.endpoints[p].direction == .from)
+            try w.print("Connect {s} → pick where it goes   ", .{label})
+        else
+            try w.print("Connect → {s}: pick what feeds it   ", .{label});
+    } else {
+        try w.writeAll("Connect: pick a device   " ++ style.bold ++ "Tab" ++ style.off ++ " Other column   ");
+    }
+    if (paged) try w.writeAll(style.bold ++ "PgUp/PgDn" ++ style.off ++ " Page   ");
+    try w.writeAll(style.bold ++ "Esc" ++ style.off ++ " Back");
+    return out.toOwnedSlice();
 }
 
 /// Width of each of the two columns, with ` │ ` between them.
@@ -272,12 +387,40 @@ fn header(arena: Allocator, name: []const u8, w: usize) Error![]const u8 {
     return out.toOwnedSlice();
 }
 
+/// How a column cell is drawn.
+const Look = union(enum) {
+    /// `  ● label`, as on the home screen.
+    plain,
+    /// `x ● label`, the letter that picks it in bold cyan.
+    letter: u8,
+    /// `  ● label`, dimmed: not in the focused column.
+    dim,
+    /// `  ● label` in reverse video: the first pick.
+    selected,
+    /// Dimmed text in place of an Endpoint.
+    note: []const u8,
+};
+
 /// One column cell, `  ● label`, exactly `w` columns wide; blank for none.
-fn cell(arena: Allocator, ep: ?graph.Endpoint, w: usize) Error![]const u8 {
+fn cell(arena: Allocator, ep: ?graph.Endpoint, w: usize, look: Look) Error![]const u8 {
     var out: Writer.Allocating = .init(arena);
     var l: text.Line = .init(&out.writer, w);
+    if (look == .note) {
+        try l.text("  " ++ style.dim);
+        try l.text(look.note);
+        try l.text(style.off);
+    }
     if (ep) |e| {
-        try l.text("  ");
+        switch (look) {
+            .letter => |c| {
+                try l.text(style.bold ++ style.cyan);
+                try l.text(&.{c});
+                try l.text(style.off ++ " ");
+            },
+            .dim => try l.text("  " ++ style.dim),
+            .selected => try l.text("  " ++ style.reverse),
+            .plain, .note => try l.text("  "),
+        }
         try l.text(style.kind(e.kind));
         try l.text("● ");
         try l.text(e.label);
@@ -578,4 +721,133 @@ test "pageDown and pageUp: bodies too short for the \"more\" rows" {
     try testing.expectEqual(1, pageDown(10, 1, 0));
     try testing.expectEqual(0, pageDown(10, 0, 0));
     try testing.expectEqual(0, pageUp(10, 0, 0));
+}
+
+fn connectRows(arena: Allocator, c: Connect, size: Size) ![]const []const u8 {
+    return connect(arena, c, size);
+}
+
+test "connect: letters in the focused column only, the other dimmed, Connections summed up" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // FROM lists only what can be picked: USB Video, not WORLDE.
+    const c: Connect = .{ .graph = fixture, .profile = "default", .modified = false, .focus = .from, .from = &.{0}, .to = try column(arena, fixture, .to) };
+    const rows = try connectRows(arena, c, .{ .rows = 14, .cols = 50 });
+    try testing.expectEqual(14, rows.len);
+    try expectRows(&.{
+        "aroute  profile: default   ● audio  ● MIDI",
+        try dashes(arena, 50),
+        "  FROM                  │   TO                   ",
+        "a ● USB Video Analog S… │   ● Speakers           ",
+        "                        │   ● 日本語のスピーカー ",
+        "                        │   ● Clipper MIDI 2     ",
+        "",
+        "  3 connections",
+        "",
+        "",
+        "",
+        try dashes(arena, 50),
+        "Connect: pick a device   Tab Other column   Esc B…",
+        "",
+    }, try plainRows(arena, rows));
+    try testing.expect(std.mem.startsWith(u8, rows[3], style.bold ++ style.cyan ++ "a" ++ style.off ++ " " ++ style.audio ++ "● USB"));
+    try testing.expect(std.mem.find(u8, rows[3], style.dim ++ style.audio ++ "● Speakers") != null);
+    try testing.expect(std.mem.find(u8, rows[5], style.dim ++ style.midi ++ "● Clipper") != null);
+}
+
+test "connect: the first pick in reverse video, on its page of the other column" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const c: Connect = .{ .graph = fixture, .profile = "default", .modified = false, .focus = .from, .from = &.{0}, .to = try column(arena, fixture, .to), .pick = 3 };
+    // 2 rows for the columns: Clipper MIDI 2 is on the TO column's second page.
+    const size: Size = .{ .rows = 10, .cols = 50 };
+    try testing.expectEqual(2, pickRows(size));
+    const rows = try connectRows(arena, c, size);
+    const p = try plainRows(arena, rows);
+    try expectRows(&.{
+        "  FROM                  │   TO                   ",
+        "a ● USB Video Analog S… │   ● Clipper MIDI 2     ",
+        "",
+        "  3 connections",
+    }, p[2..6]);
+    try testing.expect(std.mem.find(u8, rows[3], style.reverse ++ style.midi ++ "● Clipper") != null);
+    try testing.expectEqualStrings("Connect → Clipper MIDI 2: pick what feeds it   Es…", p[8]);
+
+    const from: Connect = .{ .graph = fixture, .profile = "default", .modified = false, .focus = .to, .from = try column(arena, fixture, .from), .to = &.{ 1, 5 }, .pick = 0 };
+    const wide = try plainRows(arena, try connectRows(arena, from, .{ .rows = 10, .cols = 90 }));
+    try testing.expectEqualStrings("Connect USB Video Analog Stereo → pick where it goes   Esc Back", wide[8]);
+}
+
+test "connect: more than a page shows which page, and PgUp/PgDn in the menu" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var eps: [7]graph.Endpoint = undefined;
+    for (&eps, 0..) |*ep, i| ep.* = .{ .label = try std.fmt.allocPrint(arena, "Out {d}", .{i}), .kind = .audio, .direction = .to, .ports = .{ .pw = &.{} } };
+    const g: graph.Graph = .{ .endpoints = &eps, .connections = &.{} };
+    const size: Size = .{ .rows = 11, .cols = 70 };
+    try testing.expectEqual(3, pickRows(size));
+    const all = try column(arena, g, .to);
+
+    var c: Connect = .{ .graph = g, .profile = "default", .modified = false, .focus = .to, .from = &.{}, .to = all, .page = 1 };
+    var p = try plainRows(arena, try connectRows(arena, c, size));
+    try expectRows(&.{
+        "  FROM                            │   TO  2/3                        ",
+        "                                  │ a ● Out 3                        ",
+        "                                  │ b ● Out 4                        ",
+        "                                  │ c ● Out 5                        ",
+        "",
+        "  no connections",
+        try dashes(arena, 70),
+        "Connect: pick a device   Tab Other column   PgUp/PgDn Page   Esc Back",
+    }, p[2..10]);
+
+    // The last page is short; a page past it is the last one.
+    c.page = 9;
+    p = try plainRows(arena, try connectRows(arena, c, size));
+    try expectRows(&.{
+        "  FROM                            │   TO  3/3                        ",
+        "                                  │ a ● Out 6                        ",
+        "",
+        "  no connections",
+    }, p[2..6]);
+
+    // The unfocused column has no page indicator.
+    c = .{ .graph = g, .profile = "default", .modified = false, .focus = .from, .from = &.{}, .to = all };
+    p = try plainRows(arena, try connectRows(arena, c, size));
+    try expectRows(&.{
+        "  FROM                            │   TO                             ",
+        "  (nothing to connect)            │   ● Out 0                        ",
+        "                                  │   ● Out 1                        ",
+        "                                  │   ● Out 2                        ",
+        "",
+        "  no connections",
+    }, p[2..8]);
+    try testing.expectEqualStrings("Connect: pick a device   Tab Other column   Esc Back", p[9]);
+}
+
+test "connect: one connection; a tiny terminal shows what fits" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var g = fixture;
+    g.connections = fixture.connections[0..1];
+    const c: Connect = .{ .graph = g, .profile = "default", .modified = true, .focus = .from, .from = &.{ 0, 2 }, .to = try column(arena, g, .to), .page = 3, .pick = null };
+    const p = try plainRows(arena, try connectRows(arena, c, .{ .rows = 24, .cols = 80 }));
+    try testing.expectEqualStrings("  1 connection", p[7]);
+
+    for ([_]Size{
+        .{ .rows = 0, .cols = 0 },  .{ .rows = 1, .cols = 1 }, .{ .rows = 3, .cols = 5 },  .{ .rows = 6, .cols = 2 },
+        .{ .rows = 7, .cols = 12 }, .{ .rows = 8, .cols = 3 }, .{ .rows = 9, .cols = 20 }, .{ .rows = 10, .cols = 4 },
+    }) |size| {
+        const rows = try connectRows(arena, c, size);
+        try testing.expectEqual(size.rows, rows.len);
+        for (rows) |r| try testing.expect(text.width(r) <= size.cols);
+    }
 }

@@ -95,12 +95,14 @@ pub fn localTime(gpa: Allocator, io: Io) Error![]u8 {
     return run(gpa, io, &.{ "date", "+%F %T" });
 }
 
-/// Makes a Link with `pw-link` or `aconnect`. One that already exists counts as made.
-pub fn connect(gpa: Allocator, io: Io, ends: graph.Ends) Error!void {
+/// Makes a Link with `pw-link` or `aconnect`. One that already exists counts
+/// as made. On `error.ToolFailed`, `why` (if given) is set to what the tool
+/// said, on one line, allocated with `gpa`.
+pub fn connect(gpa: Allocator, io: Io, ends: graph.Ends, why: ?*[]const u8) Error!void {
     var buf: [2][16]u8 = undefined;
     return switch (ends) {
-        .pw => |p| change(gpa, io, &.{ "pw-link", id(&buf[0], p[0]), id(&buf[1], p[1]) }, "File exists"),
-        .alsa => |a| change(gpa, io, &.{ "aconnect", addr(&buf[0], a[0]), addr(&buf[1], a[1]) }, "already subscribed"),
+        .pw => |p| change(gpa, io, &.{ "pw-link", id(&buf[0], p[0]), id(&buf[1], p[1]) }, "File exists", why),
+        .alsa => |a| change(gpa, io, &.{ "aconnect", addr(&buf[0], a[0]), addr(&buf[1], a[1]) }, "already subscribed", why),
     };
 }
 
@@ -108,8 +110,8 @@ pub fn connect(gpa: Allocator, io: Io, ends: graph.Ends) Error!void {
 pub fn disconnect(gpa: Allocator, io: Io, ends: graph.Ends) Error!void {
     var buf: [2][16]u8 = undefined;
     return switch (ends) {
-        .pw => |p| change(gpa, io, &.{ "pw-link", "-d", id(&buf[0], p[0]), id(&buf[1], p[1]) }, null),
-        .alsa => |a| change(gpa, io, &.{ "aconnect", "-d", addr(&buf[0], a[0]), addr(&buf[1], a[1]) }, null),
+        .pw => |p| change(gpa, io, &.{ "pw-link", "-d", id(&buf[0], p[0]), id(&buf[1], p[1]) }, null, null),
+        .alsa => |a| change(gpa, io, &.{ "aconnect", "-d", addr(&buf[0], a[0]), addr(&buf[1], a[1]) }, null, null),
     };
 }
 
@@ -122,17 +124,35 @@ fn addr(buf: *[16]u8, a: graph.Addr) []const u8 {
 }
 
 /// Succeeds if the command does, or if its output says it was already done.
-fn change(gpa: Allocator, io: Io, argv: []const []const u8, already: ?[]const u8) Error!void {
+/// Otherwise, sets `why` to what it said (see `oneLine`).
+fn change(gpa: Allocator, io: Io, argv: []const []const u8, already: ?[]const u8, why: ?*[]const u8) Error!void {
     const result = std.process.run(gpa, io, .{ .argv = argv }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FileNotFound => return error.MissingTool,
-        else => return error.ToolFailed,
+        else => {
+            if (why) |w| w.* = try std.fmt.allocPrint(gpa, "{s} failed", .{argv[0]});
+            return error.ToolFailed;
+        },
     };
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     if (result.term.success()) return;
-    const done = already orelse return error.ToolFailed;
-    if (std.mem.find(u8, result.stderr, done) == null and std.mem.find(u8, result.stdout, done) == null) return error.ToolFailed;
+    if (already) |done| {
+        if (std.mem.find(u8, result.stderr, done) != null or std.mem.find(u8, result.stdout, done) != null) return;
+    }
+    if (why) |w| w.* = try oneLine(gpa, argv[0], result.stderr, result.stdout);
+    return error.ToolFailed;
+}
+
+/// A tool's error output on one line, as the script shows it: `stderr`, or
+/// `stdout` if that is empty, with its lines joined by spaces; `<tool>
+/// failed` if it said nothing.
+fn oneLine(gpa: Allocator, tool: []const u8, stderr: []const u8, stdout: []const u8) Allocator.Error![]const u8 {
+    const said = std.mem.trim(u8, if (std.mem.trim(u8, stderr, &std.ascii.whitespace).len > 0) stderr else stdout, &std.ascii.whitespace);
+    if (said.len == 0) return std.fmt.allocPrint(gpa, "{s} failed", .{tool});
+    const line = try gpa.dupe(u8, said);
+    std.mem.replaceScalar(u8, line, '\n', ' ');
+    return line;
 }
 
 fn run(gpa: Allocator, io: Io, argv: []const []const u8) Error![]u8 {
@@ -169,6 +189,16 @@ test "missing: executables on PATH, empty entries meaning the current directory"
     const path = try std.fmt.allocPrint(arena, "/nonexistent:{s}/a::{s}/b", .{ root, root });
     try testing.expectEqualSlices(Tool, &.{.aconnect}, try missing(arena, testing.io, path));
     try testing.expectEqualSlices(Tool, &.{ .@"pw-dump", .@"pw-link", .aconnect }, try missing(arena, testing.io, ""));
+}
+
+test "oneLine: what a tool said, on one line" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testing.expectEqualStrings("failed to link ports: No such file or directory", try oneLine(arena, "pw-link", "failed to link ports: No such file or directory\n", ""));
+    try testing.expectEqualStrings("Connection failed (Operation not permitted) try again", try oneLine(arena, "aconnect", "\nConnection failed (Operation not permitted)\ntry again\n", "ignored"));
+    try testing.expectEqualStrings("on stdout", try oneLine(arena, "pw-link", " \n", "on stdout\n"));
+    try testing.expectEqualStrings("pw-link failed", try oneLine(arena, "pw-link", "", "\n"));
 }
 
 test "explainMissing: what to install for each" {
