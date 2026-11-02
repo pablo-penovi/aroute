@@ -243,7 +243,28 @@ pub fn parse(arena: Allocator, dump: []const u8, scan: alsa.Scan) ParseError!gra
         n.* = .{ .name = e.key_ptr.*, .label = nodeOf(nodes, e.value_ptr.*).label };
     }
 
-    return .{ .endpoints = endpoints.items, .connections = connections, .nodes = named };
+    var named_ports: std.ArrayList(graph.NamedPort) = .empty;
+    for (endpoints.items[0..scan.endpoints.len]) |ep| {
+        const a = ep.ports.alsa;
+        try named_ports.append(arena, .{
+            .name = try std.fmt.allocPrint(arena, "alsa:{s}", .{scan.name(a.addr)}),
+            .direction = ep.direction,
+            .kind = ep.kind,
+            .pw = a.bridge,
+            .alsa = a.addr,
+        });
+    }
+    for (ports.items) |*port| {
+        if (port.bridge != null) continue;
+        try named_ports.append(arena, .{
+            .name = try portName(arena, nodes, scan, port),
+            .direction = port.direction,
+            .kind = port.kind,
+            .pw = port.id,
+        });
+    }
+
+    return .{ .endpoints = endpoints.items, .connections = connections, .nodes = named, .ports = named_ports.items };
 }
 
 fn addLink(arena: Allocator, pending: *std.ArrayList(PendingConnection), from: usize, to: usize, link: graph.Link) Allocator.Error!void {
