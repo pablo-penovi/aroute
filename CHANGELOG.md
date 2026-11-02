@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-02
+
+The Zig `aroute` replaces the script for daily use: everything the script does works the same, apart from the deliberate differences listed in `docs/design.md`.
+
+### Added
+
+- `aroute --help` (or `-h`) prints the same usage text as the script.
+
+### Fixed
+
+- The first Connect pick is shown in reverse video across its whole cell, as in the script, not just under its name.
+
+### Changed
+
+- `docs/design.md` lists every deliberate difference from the script.
+
 ## [0.0.10] - 2026-11-02
 
 ### Added

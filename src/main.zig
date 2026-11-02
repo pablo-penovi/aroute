@@ -73,6 +73,8 @@ pub fn main(init: std.process.Init) !void {
         const result = try load.apply(arena, g, p, Wiring{ .arena = arena, .io = io });
         try load.summary(out, name, p, result, .{});
         try out.writeByte('\n');
+    } else if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
+        try out.writeAll(cli.help);
     } else if (command.len == 0) {
         if (!try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) {
             die(io, "the TUI needs a terminal (see --help for non-interactive use)", .{});

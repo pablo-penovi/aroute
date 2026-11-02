@@ -8,6 +8,39 @@ const pipewire = @import("pipewire.zig");
 const alsa = @import("alsa.zig");
 const Aliases = @import("aliases.zig").Aliases;
 
+/// `--help`: the same text as the script's.
+pub const help =
+    \\aroute — two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI.
+    \\
+    \\  aroute                  interactive TUI
+    \\  aroute --list           print devices, connections and the current snapshot
+    \\  aroute --profiles       list saved profiles
+    \\  aroute --save NAME      save all current connections as a profile
+    \\  aroute --load NAME [--force]
+    \\                          replace all current connections with a profile
+    \\
+    \\Audio is always routed with pw-link. MIDI between two ALSA sequencer ports
+    \\uses aconnect; MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes
+    \\through pw-link via PipeWire's Midi-Bridge.
+    \\
+    \\Profiles: ${XDG_CONFIG_HOME:-~/.config}/aroute/profiles/<name>.conf, one
+    \\"FROM|TO" port pair per line. Ports are named "pw:<node.name>:<port.name>"
+    \\or "alsa:<client name>:<port name>", never by numeric ID.
+    \\
+    \\Saving a profile records every current connection. Loading one makes the
+    \\whole graph match it: every current connection not in the profile is
+    \\removed. If audio devices from the profile are missing, you are asked
+    \\whether to abort or to hook up only the connections that are possible
+    \\(--load aborts when not on a terminal, unless --force is given).
+    \\
+    \\Display names can be overridden in ${XDG_CONFIG_HOME:-~/.config}/aroute/aliases,
+    \\one "text=replacement" per line (applied as a substring replace).
+    \\
+    \\AROUTE_SHOW_ALL=1 also lists normally hidden ports (Midi Through, Sync ports).
+    \\
+    \\
+;
+
 /// `--list`: every Endpoint, the Connections between them, and the snapshot
 /// that `--save` would write.
 pub fn list(w: *Writer, arena: Allocator, g: graph.Graph) (Writer.Error || Allocator.Error)!void {
@@ -142,6 +175,10 @@ test "list: real machine with ALSA MIDI and BLE MIDI" {
         \\  pw:bluez_midi.server:out|alsa:WORLDE:WORLDE MIDI 1
         \\
     , out.written());
+}
+
+test "help: same text as the script's --help" {
+    try testing.expectEqualStrings(@embedFile("testdata/script-help.txt"), help);
 }
 
 test "list: empty graph" {
