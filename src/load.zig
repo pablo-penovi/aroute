@@ -11,9 +11,9 @@ const profile = @import("profile.zig");
 /// One `FROM|TO` line whose Ports are both present.
 pub const Wanted = struct {
     line: []const u8,
-    /// How to make the Link: `aconnect` between two ALSA Ports, otherwise
-    /// `pw-link`. Null when it cannot be made, e.g. an ALSA Port with no
-    /// Midi-Bridge port to a PipeWire one.
+    /// How to make the Link: a sequencer subscription between two ALSA
+    /// Ports, otherwise `pw-link`. Null when it cannot be made, e.g. an ALSA
+    /// Port with no Midi-Bridge port to a PipeWire one.
     ends: ?graph.Ends,
 };
 
@@ -144,11 +144,7 @@ const alsa = @import("alsa.zig");
 
 /// The real machine with ALSA MIDI, BLE MIDI and audio devices.
 fn midiMachine(arena: Allocator) !graph.Graph {
-    const midi = try alsa.parse(arena, .{
-        .sources = @embedFile("testdata/aconnect-i.txt"),
-        .destinations = @embedFile("testdata/aconnect-o.txt"),
-        .connections = @embedFile("testdata/aconnect-l.txt"),
-    }, false);
+    const midi = try alsa.parse(arena, @import("testdata/seq-listing.zig").listing, false);
     return pipewire.parse(arena, @embedFile("testdata/pw-dump-midi.json"), midi);
 }
 
@@ -230,7 +226,7 @@ test "how each wanted Link is made" {
         \\pw:alsa_input.usb-MACROSILICON_USB_Video-02.analog-stereo:capture_FL|pw:alsa_output.pci-0000_0d_00.1.hdmi-stereo-extra2:playback_FL
     ));
     try testing.expectEqual(4, p.wanted.len);
-    // ALSA to BLE MIDI through the Midi-Bridge, ALSA to ALSA with aconnect.
+    // ALSA to BLE MIDI through the Midi-Bridge, ALSA to ALSA through the sequencer.
     try testing.expectEqualDeep(graph.Ends{ .pw = .{ 157, 59 } }, p.wanted[0].ends.?);
     try testing.expectEqualDeep(graph.Ends{ .alsa = .{ .{ .client = 128, .port = 0 }, .{ .client = 129, .port = 1 } } }, p.wanted[1].ends.?);
     try testing.expectEqualDeep(graph.Ends{ .pw = .{ 60, 154 } }, p.wanted[2].ends.?);
@@ -315,11 +311,9 @@ test "an ALSA Port without a Midi-Bridge port cannot be wired to a PipeWire one"
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // No Midi-Bridge for WORLDE in this dump.
-    const midi = try alsa.parse(arena, .{
-        .sources = @embedFile("testdata/aconnect-i.txt"),
-        .destinations = @embedFile("testdata/aconnect-o.txt"),
-    }, false);
+    // No Midi-Bridge for WORLDE in this dump, and no ALSA Links.
+    const listing = @import("testdata/seq-listing.zig").listing;
+    const midi = try alsa.parse(arena, .{ .clients = listing.clients, .ports = listing.ports }, false);
     const g = try pipewire.parse(arena, @embedFile("testdata/pw-dump-streams.json"), midi);
     const p = try plan(arena, g, try profile.parse(arena, "pw:bluez_midi.server:out|alsa:WORLDE:WORLDE MIDI 1\n"));
     try testing.expectEqual(1, p.wanted.len);

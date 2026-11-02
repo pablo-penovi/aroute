@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-02
+
+### Changed
+
+- ALSA MIDI is listed, connected and disconnected through the kernel's sequencer interface (`/dev/snd/seq`) directly instead of by running `aconnect`, in the TUI and in `--list`, `--save` and `--load` (ADR 0002). Endpoints, labels, hidden Ports, Profiles and messages are the same as before. aroute shows up as a sequencer client called `aroute`, with no Ports, while it runs.
+- A Link that already exists counts as made only if the sequencer really has it. Before, any `aconnect` error mentioning "already subscribed" counted.
+
+### Removed
+
+- alsa-utils (`aconnect`) is no longer needed. The missing-dependency message names only `pw-dump` and `pw-link`.
+
 ## [0.1.1] - 2026-11-02
 
 ### Changed

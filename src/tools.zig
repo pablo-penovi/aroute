@@ -1,28 +1,18 @@
-//! Runs the PipeWire and ALSA command-line tools (ADR 0001), to read the graph
-//! and to change it. Nothing here interprets what they list; see
-//! `pipewire.zig` and `alsa.zig` for that.
+//! Runs the PipeWire command-line tools (ADR 0001), to read the graph and to
+//! change it. Nothing here interprets what they list; see `pipewire.zig` for
+//! that. ALSA goes through the sequencer directly (`seq.zig`, ADR 0002).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const graph = @import("graph.zig");
 
 /// The tools aroute runs, checked for at startup.
 pub const Tool = enum {
     @"pw-dump",
     @"pw-link",
-    aconnect,
 
-    /// Where it comes from, and what to install to get it.
-    const Source = struct { from: []const u8, install: []const u8 };
-
-    const sources = [_]struct { tools: []const Tool, source: Source }{
-        .{ .tools = &.{ .@"pw-dump", .@"pw-link" }, .source = .{
-            .from = "PipeWire",
-            .install = "pipewire (Arch), pipewire-bin (Debian, Ubuntu) or pipewire-utils (Fedora)",
-        } },
-        .{ .tools = &.{.aconnect}, .source = .{ .from = "ALSA", .install = "alsa-utils" } },
-    };
+    /// Both come with PipeWire.
+    const install = "pipewire (Arch), pipewire-bin (Debian, Ubuntu) or pipewire-utils (Fedora)";
 };
 
 /// The tools not found as executables in the directories of `path` (a
@@ -40,23 +30,14 @@ pub fn missing(arena: Allocator, io: Io, path: []const u8) Allocator.Error![]con
     return list.items;
 }
 
-/// What is missing and what to install for it, one line each, as
+/// What is missing and what to install for it, as
 ///
-///     missing dependencies: pw-link, aconnect
+///     missing dependency: pw-link
 ///       pw-dump and pw-link come with PipeWire: install pipewire (Arch), …
-///       aconnect comes with ALSA: install alsa-utils
 pub fn explainMissing(w: *Io.Writer, tools: []const Tool) Io.Writer.Error!void {
     try w.print("missing {s}: ", .{if (tools.len == 1) "dependency" else "dependencies"});
     for (tools, 0..) |t, i| try w.print("{s}{t}", .{ if (i > 0) ", " else "", t });
-    try w.writeByte('\n');
-    for (Tool.sources) |s| {
-        for (s.tools) |t| {
-            if (std.mem.findScalar(Tool, tools, t) != null) break;
-        } else continue;
-        try w.writeAll("  ");
-        for (s.tools, 0..) |t, i| try w.print("{s}{t}", .{ if (i == 0) "" else if (i + 1 == s.tools.len) " and " else ", ", t });
-        try w.print(" come{s} with {s}: install {s}\n", .{ if (s.tools.len == 1) "s" else "", s.source.from, s.source.install });
-    }
+    try w.writeAll("\n  pw-dump and pw-link come with PipeWire: install " ++ Tool.install ++ "\n");
 }
 
 pub const Error = error{
@@ -71,56 +52,28 @@ pub fn pwDump(gpa: Allocator, io: Io) Error![]u8 {
     return run(gpa, io, &.{"pw-dump"});
 }
 
-pub const AconnectList = enum {
-    /// `-i`: readable Ports.
-    sources,
-    /// `-o`: writable Ports.
-    destinations,
-    /// `-l`: every Port and its subscriptions.
-    connections,
-};
-
-/// The ALSA sequencer Ports as `aconnect` lists them. Caller owns the result.
-pub fn aconnect(gpa: Allocator, io: Io, list: AconnectList) Error![]u8 {
-    return run(gpa, io, &.{ "aconnect", switch (list) {
-        .sources => "-i",
-        .destinations => "-o",
-        .connections => "-l",
-    } });
-}
-
 /// The local time as `date '+%F %T'` prints it (`2026-11-01 16:45:00`),
 /// newline included. Caller owns the result.
 pub fn localTime(gpa: Allocator, io: Io) Error![]u8 {
     return run(gpa, io, &.{ "date", "+%F %T" });
 }
 
-/// Makes a Link with `pw-link` or `aconnect`. One that already exists counts
-/// as made. On `error.ToolFailed`, `why` (if given) is set to what the tool
+/// Makes a PipeWire Link with `pw-link`. One that already exists counts as
+/// made. On `error.ToolFailed`, `why` (if given) is set to what `pw-link`
 /// said, on one line, allocated with `gpa`.
-pub fn connect(gpa: Allocator, io: Io, ends: graph.Ends, why: ?*[]const u8) Error!void {
+pub fn connect(gpa: Allocator, io: Io, ports: [2]u32, why: ?*[]const u8) Error!void {
     var buf: [2][16]u8 = undefined;
-    return switch (ends) {
-        .pw => |p| change(gpa, io, &.{ "pw-link", id(&buf[0], p[0]), id(&buf[1], p[1]) }, "File exists", why),
-        .alsa => |a| change(gpa, io, &.{ "aconnect", addr(&buf[0], a[0]), addr(&buf[1], a[1]) }, "already subscribed", why),
-    };
+    return change(gpa, io, &.{ "pw-link", id(&buf[0], ports[0]), id(&buf[1], ports[1]) }, "File exists", why);
 }
 
-/// Undoes a Link with `pw-link -d` or `aconnect -d`.
-pub fn disconnect(gpa: Allocator, io: Io, ends: graph.Ends) Error!void {
+/// Undoes a PipeWire Link with `pw-link -d`.
+pub fn disconnect(gpa: Allocator, io: Io, ports: [2]u32) Error!void {
     var buf: [2][16]u8 = undefined;
-    return switch (ends) {
-        .pw => |p| change(gpa, io, &.{ "pw-link", "-d", id(&buf[0], p[0]), id(&buf[1], p[1]) }, null, null),
-        .alsa => |a| change(gpa, io, &.{ "aconnect", "-d", addr(&buf[0], a[0]), addr(&buf[1], a[1]) }, null, null),
-    };
+    return change(gpa, io, &.{ "pw-link", "-d", id(&buf[0], ports[0]), id(&buf[1], ports[1]) }, null, null);
 }
 
 fn id(buf: *[16]u8, n: u32) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
-}
-
-fn addr(buf: *[16]u8, a: graph.Addr) []const u8 {
-    return std.fmt.bufPrint(buf, "{f}", .{a}) catch unreachable;
 }
 
 /// Succeeds if the command does, or if its output says it was already done.
@@ -181,14 +134,15 @@ test "missing: executables on PATH, empty entries meaning the current directory"
     try tmp.dir.createDirPath(testing.io, "a");
     try tmp.dir.createDirPath(testing.io, "b");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "a/pw-dump", .data = "", .flags = .{ .permissions = .executable_file } });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "b/pw-link", .data = "", .flags = .{ .permissions = .executable_file } });
     // Not executable.
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "b/aconnect", .data = "" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "a/pw-link", .data = "" });
 
     const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const path = try std.fmt.allocPrint(arena, "/nonexistent:{s}/a::{s}/b", .{ root, root });
-    try testing.expectEqualSlices(Tool, &.{.aconnect}, try missing(arena, testing.io, path));
-    try testing.expectEqualSlices(Tool, &.{ .@"pw-dump", .@"pw-link", .aconnect }, try missing(arena, testing.io, ""));
+    try testing.expectEqualSlices(Tool, &.{.@"pw-link"}, try missing(arena, testing.io, path));
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "b/pw-link", .data = "", .flags = .{ .permissions = .executable_file } });
+    try testing.expectEqualSlices(Tool, &.{}, try missing(arena, testing.io, path));
+    try testing.expectEqualSlices(Tool, &.{ .@"pw-dump", .@"pw-link" }, try missing(arena, testing.io, ""));
 }
 
 test "oneLine: what a tool said, on one line" {
@@ -196,23 +150,22 @@ test "oneLine: what a tool said, on one line" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     try testing.expectEqualStrings("failed to link ports: No such file or directory", try oneLine(arena, "pw-link", "failed to link ports: No such file or directory\n", ""));
-    try testing.expectEqualStrings("Connection failed (Operation not permitted) try again", try oneLine(arena, "aconnect", "\nConnection failed (Operation not permitted)\ntry again\n", "ignored"));
+    try testing.expectEqualStrings("Connection failed (Operation not permitted) try again", try oneLine(arena, "pw-link", "\nConnection failed (Operation not permitted)\ntry again\n", "ignored"));
     try testing.expectEqualStrings("on stdout", try oneLine(arena, "pw-link", " \n", "on stdout\n"));
     try testing.expectEqualStrings("pw-link failed", try oneLine(arena, "pw-link", "", "\n"));
 }
 
-test "explainMissing: what to install for each" {
+test "explainMissing: what to install" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try explainMissing(&out.writer, &.{ .@"pw-link", .aconnect });
+    try explainMissing(&out.writer, &.{ .@"pw-dump", .@"pw-link" });
     try testing.expectEqualStrings(
-        \\missing dependencies: pw-link, aconnect
+        \\missing dependencies: pw-dump, pw-link
         \\  pw-dump and pw-link come with PipeWire: install pipewire (Arch), pipewire-bin (Debian, Ubuntu) or pipewire-utils (Fedora)
-        \\  aconnect comes with ALSA: install alsa-utils
         \\
     , out.written());
 
     out.clearRetainingCapacity();
-    try explainMissing(&out.writer, &.{.aconnect});
-    try testing.expectEqualStrings("missing dependency: aconnect\n  aconnect comes with ALSA: install alsa-utils\n", out.written());
+    try explainMissing(&out.writer, &.{.@"pw-link"});
+    try testing.expectEqualStrings("missing dependency: pw-link\n  pw-dump and pw-link come with PipeWire: install pipewire (Arch), pipewire-bin (Debian, Ubuntu) or pipewire-utils (Fedora)\n", out.written());
 }

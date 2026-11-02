@@ -1,22 +1,13 @@
-//! Turns `aconnect -i`, `-o` and `-l` output into ALSA MIDI Endpoints, one per
-//! sequencer Port and direction, and the Links between them, as the script's
-//! `scan_alsa` and `scan_alsa_links` do.
+//! Turns the sequencer's listing into ALSA MIDI Endpoints, one per Port and
+//! direction, and the Links between them, as the script's `scan_alsa` and
+//! `scan_alsa_links` do with `aconnect`'s.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const graph = @import("graph.zig");
 const Addr = graph.Addr;
 const Direction = graph.Direction;
-
-/// What `aconnect` printed.
-pub const Output = struct {
-    /// `aconnect -i`: Ports that can be read from.
-    sources: []const u8 = "",
-    /// `aconnect -o`: Ports that can be written to.
-    destinations: []const u8 = "",
-    /// `aconnect -l`: every Port, with what it is connected to.
-    connections: []const u8 = "",
-};
+const seq = @import("seq.zig");
 
 /// A Link between two of `Scan.endpoints`.
 pub const ScannedLink = struct {
@@ -26,7 +17,7 @@ pub const ScannedLink = struct {
 };
 
 pub const Scan = struct {
-    /// Sources first, then Destinations, each in `aconnect` order.
+    /// Sources first, then Destinations, each in the listing's order.
     endpoints: []const graph.Endpoint = &.{},
     links: []const ScannedLink = &.{},
     /// `<client name>:<port name>` by address, for naming Ports in profiles.
@@ -48,36 +39,30 @@ pub const Scan = struct {
     }
 };
 
-/// Everything returned is allocated in `arena`, and may point into `out`.
+/// Everything returned is allocated in `arena`, and may point into `listing`.
 /// `show_all` keeps `Midi Through` clients and `*Sync` ports visible.
-pub fn parse(arena: Allocator, out: Output, show_all: bool) Allocator.Error!Scan {
+pub fn parse(arena: Allocator, listing: seq.Listing, show_all: bool) Allocator.Error!Scan {
     var scan: Scan = .{};
     var endpoints: std.ArrayList(graph.Endpoint) = .empty;
     // The client name of each Endpoint, for labelling.
     var clients: std.ArrayList([]const u8) = .empty;
 
-    for ([_]struct { []const u8, Direction }{ .{ out.sources, .from }, .{ out.destinations, .to } }) |pass| {
-        var client: ?struct { id: u16, name: []const u8 } = null;
-        var lines = std.mem.splitScalar(u8, pass[0], '\n');
-        while (lines.next()) |line| {
-            if (clientLine(line)) |c| {
-                if (c.name) |cname| client = .{ .id = c.id, .name = cname };
-                continue;
-            }
-            const p = portLine(line) orelse continue;
-            const c = client orelse continue;
-            const pname = p.name orelse continue;
-            if (c.id == 0 or std.mem.startsWith(u8, c.name, "PipeWire-")) continue;
-            const addr: Addr = .{ .client = c.id, .port = p.id };
-            try scan.names.put(arena, addr, try std.fmt.allocPrint(arena, "{s}:{s}", .{ c.name, pname }));
+    for ([_]Direction{ .from, .to }) |direction| {
+        for (listing.ports) |p| {
+            if (!listed(p, direction)) continue;
+            const client = listing.clientName(p.addr.client) orelse continue;
+            if (p.addr.client == 0 or std.mem.startsWith(u8, client, "PipeWire-")) continue;
+            // `aconnect` padded names with spaces, which profiles never kept.
+            const name = std.mem.trimEnd(u8, p.name, " ");
+            try scan.names.put(arena, p.addr, try std.fmt.allocPrint(arena, "{s}:{s}", .{ client, name }));
             try endpoints.append(arena, .{
-                .label = pname,
+                .label = name,
                 .kind = .midi,
-                .direction = pass[1],
-                .ports = .{ .alsa = .{ .addr = addr } },
-                .hidden = !show_all and (std.mem.eql(u8, c.name, "Midi Through") or std.mem.endsWith(u8, pname, "Sync")),
+                .direction = direction,
+                .ports = .{ .alsa = .{ .addr = p.addr } },
+                .hidden = !show_all and (std.mem.eql(u8, client, "Midi Through") or std.mem.endsWith(u8, name, "Sync")),
             });
-            try clients.append(arena, c.name);
+            try clients.append(arena, client);
         }
     }
 
@@ -91,83 +76,35 @@ pub fn parse(arena: Allocator, out: Output, show_all: bool) Allocator.Error!Scan
         if (visible <= 1) ep.label = client;
     }
     scan.endpoints = endpoints.items;
-    scan.links = try parseLinks(arena, scan, out.connections);
+
+    var links: std.ArrayList(ScannedLink) = .empty;
+    for (listing.subscriptions) |sub| {
+        const from = scan.find(.from, sub.from) orelse continue;
+        const to = scan.find(.to, sub.to) orelse continue;
+        try links.append(arena, .{ .from = from, .to = to, .link = .{
+            .ends = .{ .alsa = .{ sub.from, sub.to } },
+            .from_name = try std.fmt.allocPrint(arena, "alsa:{s}", .{scan.name(sub.from)}),
+            .to_name = try std.fmt.allocPrint(arena, "alsa:{s}", .{scan.name(sub.to)}),
+        } });
+    }
+    scan.links = links.items;
     return scan;
 }
 
-fn parseLinks(arena: Allocator, scan: Scan, listing: []const u8) Allocator.Error![]const ScannedLink {
-    var links: std.ArrayList(ScannedLink) = .empty;
-    var client: ?u16 = null;
-    var src: ?Addr = null;
-    var lines = std.mem.splitScalar(u8, listing, '\n');
-    while (lines.next()) |line| {
-        if (clientLine(line)) |c| {
-            client = c.id;
-        } else if (portLine(line)) |p| {
-            src = if (client) |c| .{ .client = c, .port = p.id } else null;
-        } else if (std.mem.find(u8, line, "Connecting To: ")) |at| {
-            const s = src orelse continue;
-            const from = scan.find(.from, s) orelse continue;
-            // `129:1, 145:0[real:1]`
-            var dests = std.mem.tokenizeAny(u8, line[at + "Connecting To: ".len ..], ", \t");
-            while (dests.next()) |dest| {
-                const d = Addr.parse(dest[0 .. std.mem.findScalar(u8, dest, '[') orelse dest.len]) orelse continue;
-                const to = scan.find(.to, d) orelse continue;
-                try links.append(arena, .{ .from = from, .to = to, .link = .{
-                    .ends = .{ .alsa = .{ s, d } },
-                    .from_name = try std.fmt.allocPrint(arena, "alsa:{s}", .{scan.name(s)}),
-                    .to_name = try std.fmt.allocPrint(arena, "alsa:{s}", .{scan.name(d)}),
-                } });
-            }
-        }
-    }
-    return links.items;
-}
-
-const ClientLine = struct {
-    id: u16,
-    /// Null when the closing `' [` is missing.
-    name: ?[]const u8,
-};
-
-/// `client 128: 'WORLDE' [type=kernel,card=2]`. The name runs to the last
-/// `' [`, so it may contain quotes.
-fn clientLine(line: []const u8) ?ClientLine {
-    const rest = std.mem.cutPrefix(u8, line, "client ") orelse return null;
-    const colon = std.mem.findScalar(u8, rest, ':') orelse return null;
-    const id = graph.number(rest[0..colon]) orelse return null;
-    const quoted = std.mem.cutPrefix(u8, rest[colon..], ": '") orelse return null;
-    const end = std.mem.findLast(u8, quoted, "' [") orelse return .{ .id = id, .name = null };
-    return .{ .id = id, .name = quoted[0..end] };
-}
-
-const PortLine = struct {
-    id: u16,
-    /// Without the padding `aconnect` adds; null when the closing quote is missing.
-    name: ?[]const u8,
-};
-
-/// `    0 'WORLDE MIDI 1   '`
-fn portLine(line: []const u8) ?PortLine {
-    const rest = std.mem.trimStart(u8, line, " ");
-    if (rest.len == line.len) return null;
-    const space = std.mem.findScalar(u8, rest, ' ') orelse return null;
-    const id = graph.number(rest[0..space]) orelse return null;
-    const quoted = std.mem.cutPrefix(u8, rest[space..], " '") orelse return null;
-    const name = if (quoted.len > 0 and quoted[quoted.len - 1] == '\'')
-        std.mem.trimEnd(u8, quoted[0 .. quoted.len - 1], " ")
-    else
-        null;
-    return .{ .id = id, .name = name };
+/// Sources are what `aconnect -i` listed, Destinations what `aconnect -o`
+/// listed: Ports others may subscribe that way, unless only their own client
+/// may route them.
+fn listed(p: seq.Port, direction: Direction) bool {
+    if (p.caps.no_export) return false;
+    return switch (direction) {
+        .from => p.caps.read and p.caps.subs_read and p.direction.allows(.input),
+        .to => p.caps.write and p.caps.subs_write and p.direction.allows(.output),
+    };
 }
 
 const testing = std.testing;
 
-const fixture: Output = .{
-    .sources = @embedFile("testdata/aconnect-i.txt"),
-    .destinations = @embedFile("testdata/aconnect-o.txt"),
-    .connections = @embedFile("testdata/aconnect-l.txt"),
-};
+const fixture = @import("testdata/seq-listing.zig").listing;
 
 fn expectEndpoint(ep: graph.Endpoint, label: []const u8, direction: Direction, addr: []const u8, hidden: bool) !void {
     try testing.expectEqualStrings(label, ep.label);
@@ -178,9 +115,6 @@ fn expectEndpoint(ep: graph.Endpoint, label: []const u8, direction: Direction, a
     try testing.expectEqual(hidden, ep.hidden);
 }
 
-// The fixture is a real `aconnect` run with three userspace clients standing
-// in for USB devices: WORLDE (one port), Clipper (two) and "Keys 'n' Pads"
-// (one port plus a read-only Sync port).
 test "fixture: one Endpoint per Port and direction, System and PipeWire clients skipped" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -218,7 +152,7 @@ test "fixture: AROUTE_SHOW_ALL shows Midi Through and Sync ports" {
     try expectEndpoint(s.endpoints[10], "Keys 'n' Pads", .to, "130:0", false);
 }
 
-test "fixture: Links from aconnect -l, between listed Ports only" {
+test "fixture: Links from the subscriptions, between listed Ports only" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const s = try parse(arena_state.allocator(), fixture, false);
@@ -239,22 +173,19 @@ test "fixture: Links from aconnect -l, between listed Ports only" {
     }
 }
 
+const rw: seq.Caps = .{ .read = true, .write = true, .subs_read = true, .subs_write = true };
+
 test "a single-port client is labelled per direction, hidden ports not counted" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const s = try parse(arena_state.allocator(), .{
-        .sources =
-        \\client 20: 'Pad' [type=kernel,card=1]
-        \\    0 'Pad MIDI 1      '
-        \\    1 'Pad MIDI 2      '
-        \\client 21: 'Midi Through' [type=kernel]
-        \\    0 'Midi Through Port-0'
-        \\    1 'Midi Through Port-1'
-        ,
-        .destinations =
-        \\client 20: 'Pad' [type=kernel,card=1]
-        \\    1 'Pad MIDI 2      '
-        ,
+        .clients = &.{ .{ .id = 20, .name = "Pad" }, .{ .id = 21, .name = "Midi Through" } },
+        .ports = &.{
+            .{ .addr = .{ .client = 20, .port = 0 }, .name = "Pad MIDI 1", .caps = .{ .read = true, .subs_read = true } },
+            .{ .addr = .{ .client = 20, .port = 1 }, .name = "Pad MIDI 2", .caps = rw },
+            .{ .addr = .{ .client = 21, .port = 0 }, .name = "Midi Through Port-0", .caps = .{ .read = true, .subs_read = true } },
+            .{ .addr = .{ .client = 21, .port = 1 }, .name = "Midi Through Port-1", .caps = .{ .read = true, .subs_read = true } },
+        },
     }, false);
     try testing.expectEqual(5, s.endpoints.len);
     try expectEndpoint(s.endpoints[0], "Pad MIDI 1", .from, "20:0", false);
@@ -265,52 +196,63 @@ test "a single-port client is labelled per direction, hidden ports not counted" 
     try expectEndpoint(s.endpoints[4], "Pad", .to, "20:1", false);
 }
 
-test "lines that are not clients or ports are ignored" {
+test "Sources and Destinations are what aconnect -i and -o listed" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const s = try parse(arena_state.allocator(), .{
-        .sources = "    0 'before any client'\n" ++
-            "client x: 'Bad id' [type=user]\n" ++
-            "    0 'still no client'\n" ++
-            "client 0: 'System' [type=kernel]\n" ++
-            "    0 'Timer           '\n" ++
-            "client 24: 'Synth' [type=user,pid=1]\n" ++
-            "    0 'no closing quote\n" ++
-            "\t1 'tab, not spaces'\n" ++
-            "    2 'Synth Out'\n" ++
-            "    x 'not a port'\n" ++
-            // Not a client line in -i/-o without the closing `' [`: the Port stays Synth's.
-            "client 25: 'no bracket'\n" ++
-            "    0 'still Synth'\n",
-        .destinations = "client 24: 'Synth' [type=user,pid=1]\n" ++
-            "    2 'Synth Out'\n",
-        .connections = "\tConnecting To: 24:2\n" ++
-            "client 24: 'Synth' [type=user,pid=1]\n" ++
-            "    2 'Synth Out'\n" ++
-            "\tConnecting To: 24:2, 24:9, 99, 24:2[real:0]\n" ++
-            "\tConnected From: 24:2\n" ++
-            "client y: 'Bad' [type=user]\n" ++
-            "    3 'not listed'\n" ++
-            "\tConnecting To: 24:2\n" ++
-            // In -l it is one, as in the script: this is 25:0, not Synth's 24:0.
-            "client 25: 'no bracket'\n" ++
-            "    0 'not listed either'\n" ++
-            "\tConnecting To: 24:2\n",
+        .clients = &.{.{ .id = 24, .name = "Synth" }},
+        .ports = &.{
+            .{ .addr = .{ .client = 24, .port = 0 }, .name = "both", .caps = rw },
+            .{ .addr = .{ .client = 24, .port = 1 }, .name = "private", .caps = .{ .read = true, .write = true, .subs_read = true, .subs_write = true, .no_export = true } },
+            .{ .addr = .{ .client = 24, .port = 2 }, .name = "write only", .caps = .{ .write = true, .subs_write = true } },
+            // Readable and writable, but only by its own client's subscriptions.
+            .{ .addr = .{ .client = 24, .port = 3 }, .name = "unsubscribable", .caps = .{ .read = true, .write = true } },
+            .{ .addr = .{ .client = 24, .port = 4 }, .name = "in", .caps = rw, .direction = .input },
+            .{ .addr = .{ .client = 24, .port = 5 }, .name = "out", .caps = rw, .direction = .output },
+            .{ .addr = .{ .client = 24, .port = 6 }, .name = "duplex", .caps = rw, .direction = .bidirection },
+        },
     }, false);
-    try testing.expectEqual(3, s.endpoints.len);
-    try expectEndpoint(s.endpoints[0], "Synth Out", .from, "24:2", false);
-    try expectEndpoint(s.endpoints[1], "still Synth", .from, "24:0", false);
-    try expectEndpoint(s.endpoints[2], "Synth", .to, "24:2", false);
-    try testing.expectEqual(2, s.links.len);
-    for (s.links) |l| {
-        try testing.expectEqual(0, l.from);
-        try testing.expectEqual(2, l.to);
-        try testing.expectEqualStrings("alsa:Synth:Synth Out", l.link.to_name);
-    }
+    const want = [_]struct { []const u8, Direction, []const u8 }{
+        .{ "both", .from, "24:0" },
+        .{ "in", .from, "24:4" },
+        .{ "duplex", .from, "24:6" },
+        .{ "both", .to, "24:0" },
+        .{ "write only", .to, "24:2" },
+        .{ "out", .to, "24:5" },
+        .{ "duplex", .to, "24:6" },
+    };
+    try testing.expectEqual(want.len, s.endpoints.len);
+    for (want, s.endpoints) |w, ep| try expectEndpoint(ep, w[0], w[1], w[2], false);
 }
 
-test "no aconnect output, no Endpoints" {
-    const s = try parse(testing.allocator, .{}, false);
+test "trailing spaces are trimmed from Port names, System and unknown clients skipped" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const s = try parse(arena_state.allocator(), .{
+        .clients = &.{ .{ .id = 0, .name = "System" }, .{ .id = 24, .name = "Synth " } },
+        .ports = &.{
+            .{ .addr = .{ .client = 0, .port = 0 }, .name = "Timer", .caps = rw },
+            .{ .addr = .{ .client = 24, .port = 0 }, .name = " Synth Out  ", .caps = rw },
+            .{ .addr = .{ .client = 24, .port = 1 }, .name = "Synth In", .caps = rw },
+            // A client that isn't listed.
+            .{ .addr = .{ .client = 25, .port = 0 }, .name = "orphan", .caps = rw },
+        },
+        .subscriptions = &.{
+            .{ .from = .{ .client = 24, .port = 0 }, .to = .{ .client = 24, .port = 1 } },
+            .{ .from = .{ .client = 0, .port = 0 }, .to = .{ .client = 24, .port = 1 } },
+            .{ .from = .{ .client = 24, .port = 0 }, .to = .{ .client = 25, .port = 0 } },
+        },
+    }, false);
+    try testing.expectEqual(4, s.endpoints.len);
+    try expectEndpoint(s.endpoints[0], " Synth Out", .from, "24:0", false);
+    try testing.expectEqualStrings("Synth : Synth Out", s.name(.{ .client = 24, .port = 0 }));
+    try testing.expectEqual(1, s.links.len);
+    try testing.expectEqualStrings("alsa:Synth : Synth Out", s.links[0].link.from_name);
+    try testing.expectEqualStrings("alsa:Synth :Synth In", s.links[0].link.to_name);
+}
+
+test "no listing, no Endpoints" {
+    const s = try parse(testing.allocator, .none, false);
     try testing.expectEqual(0, s.endpoints.len);
     try testing.expectEqual(0, s.links.len);
 }

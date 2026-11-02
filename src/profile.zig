@@ -339,11 +339,7 @@ test "real machine with ALSA MIDI and BLE MIDI: same file as the script" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const midi = try alsa.parse(arena, .{
-        .sources = @embedFile("testdata/aconnect-i.txt"),
-        .destinations = @embedFile("testdata/aconnect-o.txt"),
-        .connections = @embedFile("testdata/aconnect-l.txt"),
-    }, false);
+    const midi = try alsa.parse(arena, @import("testdata/seq-listing.zig").listing, false);
     const aliases = try Aliases.parse(arena, "Clipper=M-Vave FM-1\n");
     var g = try pipewire.parse(arena, @embedFile("testdata/pw-dump-midi.json"), midi);
     try g.applyAliases(arena, aliases);

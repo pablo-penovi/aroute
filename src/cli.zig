@@ -121,11 +121,7 @@ test "list: real machine with ALSA MIDI and BLE MIDI" {
     const arena = arena_state.allocator();
 
     // Matches the script's --list on the same captures, apart from the snapshot indent.
-    const midi = try alsa.parse(arena, .{
-        .sources = @embedFile("testdata/aconnect-i.txt"),
-        .destinations = @embedFile("testdata/aconnect-o.txt"),
-        .connections = @embedFile("testdata/aconnect-l.txt"),
-    }, false);
+    const midi = try alsa.parse(arena, @import("testdata/seq-listing.zig").listing, false);
     const g = try pipewire.parse(arena, @embedFile("testdata/pw-dump-midi.json"), midi);
 
     var out: Writer.Allocating = .init(arena);

@@ -64,7 +64,7 @@ pub const Error = error{
 } || Allocator.Error;
 
 /// The Links that connect the Source `from` to the Destination `to`: one
-/// `aconnect` between two ALSA Ports, otherwise `pw-link`s between their
+/// sequencer subscription between two ALSA Ports, otherwise `pw-link`s between their
 /// PipeWire Ports (an ALSA Port's being its Midi-Bridge port), paired by
 /// `pairChannels`.
 pub fn links(arena: Allocator, g: Graph, from: usize, to: usize) Error![]const graph.Ends {
@@ -297,7 +297,7 @@ test "pairChannels: by order when positions are missing or don't match" {
     try testing.expectEqual(0, (try pairChannels(arena, g, &.{ 1, 2 }, &.{})).len);
 }
 
-test "links: aconnect between ALSA Ports, pw-link through the Midi-Bridge otherwise" {
+test "links: a subscription between ALSA Ports, pw-link through the Midi-Bridge otherwise" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
