@@ -8,7 +8,17 @@ const alsa = @import("alsa.zig");
 const tools = @import("tools.zig");
 const profile = @import("profile.zig");
 const load = @import("load.zig");
+const term = @import("term.zig");
+const tui = @import("tui.zig");
 const Aliases = @import("aliases.zig").Aliases;
+
+/// A panic in the TUI puts the terminal back first, so the trace is readable.
+pub const panic = std.debug.FullPanic(struct {
+    fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+        term.restore();
+        std.debug.defaultPanic(msg, first_trace_addr);
+    }
+}.panic);
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -51,7 +61,14 @@ pub fn main(init: std.process.Init) !void {
         try load.summary(out, name, p, result);
         try out.writeByte('\n');
     } else if (command.len == 0) {
-        die(io, "not implemented yet (see docs/design.md)", .{});
+        if (!try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) {
+            die(io, "the TUI needs a terminal (see --help for non-interactive use)", .{});
+        }
+        const scanner: Scanner = .{ .io = io, .aliases = aliases, .show_all = show_all };
+        tui.run(init.gpa, io, scanner) catch |err| switch (err) {
+            error.Unreadable => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
+            else => |e| return e,
+        };
     } else {
         die(io, "unknown option '{s}' (try --help)", .{command});
     }
@@ -147,11 +164,30 @@ fn profileNames(arena: Allocator, io: Io, profiles_dir: []const u8) Allocator.Er
 }
 
 /// Reads the graph, with aliases applied to every Endpoint label.
-fn scan(arena: Allocator, io: Io, aliases: Aliases, show_all: bool) !graph.Graph {
+fn scan(arena: Allocator, io: Io, aliases: Aliases, show_all: bool) Allocator.Error!graph.Graph {
+    return readGraph(arena, io, aliases, show_all) catch |err| switch (err) {
+        error.Unreadable => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// Reads the graph for the TUI, every second.
+const Scanner = struct {
+    io: Io,
+    aliases: Aliases,
+    show_all: bool,
+
+    pub fn scan(s: Scanner, arena: Allocator) tui.ScanError!graph.Graph {
+        return readGraph(arena, s.io, s.aliases, s.show_all);
+    }
+};
+
+/// Like `scan`, but a graph that can't be read is an error.
+fn readGraph(arena: Allocator, io: Io, aliases: Aliases, show_all: bool) tui.ScanError!graph.Graph {
     const dump = tools.pwDump(arena, io) catch |err| switch (err) {
         error.MissingTool => die(io, "missing dependency: pw-dump", .{}),
-        error.ToolFailed => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
-        else => |e| return e,
+        error.ToolFailed => return error.Unreadable,
+        error.OutOfMemory => return error.OutOfMemory,
     };
     const midi = try alsa.parse(arena, .{
         .sources = try aconnect(arena, io, .sources),
@@ -159,7 +195,7 @@ fn scan(arena: Allocator, io: Io, aliases: Aliases, show_all: bool) !graph.Graph
         .connections = try aconnect(arena, io, .connections),
     }, show_all);
     var g = pipewire.parse(arena, dump, midi) catch |err| switch (err) {
-        error.InvalidDump => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
+        error.InvalidDump => return error.Unreadable,
         else => |e| return e,
     };
     try g.applyAliases(arena, aliases);
@@ -207,7 +243,9 @@ fn dieMissing(io: Io, missing: []const tools.Tool) noreturn {
     std.process.exit(1);
 }
 
+/// Puts the terminal back first if the TUI is up.
 fn die(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
+    term.restore();
     var buf: [1024]u8 = undefined;
     var stderr = Io.File.stderr().writer(io, &buf);
     stderr.interface.print("aroute: " ++ fmt ++ "\n", args) catch {};
