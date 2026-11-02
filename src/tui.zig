@@ -381,13 +381,6 @@ const FakeScanner = struct {
     }
 };
 
-/// For keys that never make a Link.
-const NoWiring = struct {
-    pub fn connect(_: NoWiring, _: Allocator, _: graph.Ends) Allocator.Error!?[]const u8 {
-        unreachable;
-    }
-};
-
 const pw_ep = graph.Endpoint{ .label = "x", .kind = .audio, .direction = .from, .ports = .{ .pw = &.{} } };
 
 var two_eps = [_]graph.Endpoint{ pw_ep, pw_ep };
@@ -460,29 +453,32 @@ test "App: Esc quits, PgUp/PgDn scroll, the other menu keys are not there yet" {
     const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &endpoints, .connections = &.{} }}, .next = &n };
     var app: App = try .init(testing.allocator, scanner);
     defer app.deinit();
+    // No key here makes a Link.
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
 
     // 24 body lines in 6 rows.
     const size: screen.Size = .{ .rows = 11, .cols = 40 };
-    try testing.expectEqual(.stay, try app.key(arena, .page_down, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .page_down, size, scanner, wiring));
     try testing.expectEqual(5, app.scroll);
-    try testing.expectEqual(.stay, try app.key(arena, .page_down, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .page_down, size, scanner, wiring));
     try testing.expectEqual(9, app.scroll);
-    try testing.expectEqual(.stay, try app.key(arena, .page_up, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .page_up, size, scanner, wiring));
     try testing.expectEqual(5, app.scroll);
-    try testing.expectEqual(.stay, try app.key(arena, .page_up, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .page_up, size, scanner, wiring));
     try testing.expectEqual(0, app.scroll);
-    try testing.expectEqual(.stay, try app.key(arena, .page_up, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .page_up, size, scanner, wiring));
     try testing.expectEqual(0, app.scroll);
-    for (0..10) |_| _ = try app.key(arena, .page_down, size, scanner, NoWiring{});
+    for (0..10) |_| _ = try app.key(arena, .page_down, size, scanner, wiring);
     try testing.expectEqual(screen.maxScroll(24, 6), app.scroll);
 
-    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '2' }, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '2' }, size, scanner, wiring));
     try testing.expectEqualStrings("Disconnect is not implemented yet", app.home().status.text);
-    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '5' }, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '5' }, size, scanner, wiring));
     try testing.expectEqualStrings("Delete profile is not implemented yet", app.home().status.text);
-    try testing.expectEqual(.stay, try app.key(arena, .{ .char = 'a' }, size, scanner, NoWiring{}));
-    try testing.expectEqual(.stay, try app.key(arena, .enter, size, scanner, NoWiring{}));
-    try testing.expectEqual(.quit, try app.key(arena, .esc, size, scanner, NoWiring{}));
+    try testing.expectEqual(.stay, try app.key(arena, .{ .char = 'a' }, size, scanner, wiring));
+    try testing.expectEqual(.stay, try app.key(arena, .enter, size, scanner, wiring));
+    try testing.expectEqual(.quit, try app.key(arena, .esc, size, scanner, wiring));
 }
 
 /// Records the Links it is asked to make; fails those in `fail`.
@@ -513,14 +509,18 @@ const studio_list = [_]graph.Endpoint{
 var studio_eps = studio_list;
 
 /// Synth is connected to Speakers.
-const studio: graph.Graph = .{ .endpoints = &studio_eps, .connections = &.{.{ .from = 1, .to = 2, .links = &.{} }} };
+const studio: graph.Graph = .{ .endpoints = &studio_eps, .connections = &.{.{ .from = 1, .to = 2, .links = &synth_speakers }} };
+const synth_speakers = [_]graph.Link{
+    .{ .ends = .{ .pw = .{ 2, 4 } }, .from_name = "pw:synth:out_FL", .to_name = "pw:speakers:in_FL" },
+    .{ .ends = .{ .pw = .{ 3, 5 } }, .from_name = "pw:synth:out_FR", .to_name = "pw:speakers:in_FR" },
+};
 
 var studio_without_synth_eps = [_]graph.Endpoint{ studio_list[0], studio_list[2], studio_list[3], studio_list[4], studio_list[5] };
 const studio_without_synth: graph.Graph = .{ .endpoints = &studio_without_synth_eps, .connections = &.{} };
 
 // Everything moved: the same Endpoints at other indexes.
 var studio_shuffled_eps = [_]graph.Endpoint{ studio_list[5], studio_list[3], studio_list[2], studio_list[1], studio_list[0], studio_list[4] };
-const studio_shuffled: graph.Graph = .{ .endpoints = &studio_shuffled_eps, .connections = &.{.{ .from = 3, .to = 2, .links = &.{} }} };
+const studio_shuffled: graph.Graph = .{ .endpoints = &studio_shuffled_eps, .connections = &.{.{ .from = 3, .to = 2, .links = &synth_speakers }} };
 
 const big: screen.Size = .{ .rows = 24, .cols = 80 };
 
@@ -654,6 +654,25 @@ test "Connect: a Link the tool can't make" {
     try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 1, 4 } }}, made.items);
 }
 
+test "Connect: a Destination with no Ports to wire" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var eps = [_]graph.Endpoint{ pwEp("Mic", .audio, .from, &.{1}), pwEp("Empty", .audio, .to, &.{}) };
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &.{} }}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    for ("1aa") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings("✗ Mic → Empty: no routable ports", app.home().status.text);
+    try testing.expect(app.home().status.err);
+    try testing.expect(app.live());
+    try testing.expectEqual(0, made.items.len);
+}
+
 test "Connect: the graph can't be re-read" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -742,7 +761,8 @@ test "Connect: PgUp/PgDn page the focused column, letters from `a` on each page"
 }
 
 fn connectAndFail(gpa: Allocator, gone: bool) !void {
-    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    // The frame arena runs out of memory too.
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var made: std.ArrayList(graph.Ends) = .empty;
