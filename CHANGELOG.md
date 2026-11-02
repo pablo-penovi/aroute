@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-02
+
+### Changed
+
+- The release notes of "Promote tag to release" are every `CHANGELOG.md` section after the latest release, up to and including the version released, each under its own heading, instead of only that version's section. The first release gets every section.
+
 ## [0.1.0] - 2026-11-02
 
 The Zig `aroute` replaces the script for daily use: everything the script does works the same, apart from the deliberate differences listed in `docs/design.md`.

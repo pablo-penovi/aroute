@@ -4,8 +4,9 @@ name: Promote tag to release
 # (vx.y.z-rcN). It must be the latest release candidate of its version, and
 # the version must be newer than the latest release.
 # Builds the Linux binaries at that tag and publishes release vx.y.z at the
-# same commit (creating the vx.y.z tag), with the notes taken from the
-# [x.y.z] section of CHANGELOG.md on main (so notes can still be fixed after
+# same commit (creating the vx.y.z tag). The notes are every CHANGELOG.md
+# section on main after the latest release, up to and including [x.y.z], so
+# they cover all the versions in between (and notes can still be fixed after
 # tagging).
 
 on:
@@ -35,6 +36,7 @@ jobs:
     outputs:
       sha: ${{ steps.check.outputs.sha }}
       version: ${{ steps.check.outputs.version }}
+      previous: ${{ steps.check.outputs.previous }}
     steps:
       - name: Checkout main
         uses: actions/checkout@v6
@@ -83,15 +85,17 @@ jobs:
             echo "::error::Tag v$version already exists at $existing, not at $TAG ($sha)."
             exit 1
           fi
-          if ! .github/scripts/changelog-notes.sh "$version" > /dev/null 2>&1; then
+          previous=${latest_release#v}
+          if ! .github/scripts/changelog-notes.sh ${previous:+--since "$previous"} "$version" > /dev/null 2>&1; then
             echo "::error::CHANGELOG.md on main has no [$version] section; add one and run this again."
             exit 1
           fi
 
-          echo "::notice::Promoting $TAG ($sha) to release v$version."
+          echo "::notice::Promoting $TAG ($sha) to release v$version, with the notes since ${latest_release:-the start}."
           {
             echo "sha=$sha"
             echo "version=$version"
+            echo "previous=$previous"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -159,8 +163,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.check.outputs.sha }}
           VERSION: ${{ needs.check.outputs.version }}
+          PREVIOUS: ${{ needs.check.outputs.previous }}
         run: |
           set -euo pipefail
-          .github/scripts/changelog-notes.sh "$VERSION" > notes.md
+          .github/scripts/changelog-notes.sh ${PREVIOUS:+--since "$PREVIOUS"} "$VERSION" > notes.md
           # Creates the vx.y.z tag at the promoted commit if it doesn't exist yet.
           gh release create "v$VERSION" dist/* --target "$SHA" --title "v$VERSION" --notes-file notes.md
