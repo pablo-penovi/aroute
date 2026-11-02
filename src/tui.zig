@@ -1058,3 +1058,26 @@ test "Disconnect: running out of memory leaks nothing" {
     try testing.checkAllAllocationFailures(testing.allocator, disconnectAndFail, .{studio_more_links});
     try testing.checkAllAllocationFailures(testing.allocator, disconnectAndFail, .{studio_unlinked});
 }
+
+test "App.rows: the screen of the current mode" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner);
+    defer app.deinit();
+
+    for ([_]?u8{ null, '1', '2' }, [_][]const u8{ "FROM", "FROM", "CONNECTIONS" }, [_][]const u8{ " Disconnect   ", "Connect: pick", "Disconnect: pick" }) |key, body, menu| {
+        if (key) |c| {
+            app.mode = .home;
+            _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+        }
+        const rows = try app.rows(arena, big);
+        try testing.expectEqual(big.rows, rows.len);
+        try testing.expect(std.mem.find(u8, rows[2], body) != null);
+        try testing.expect(std.mem.find(u8, rows[big.rows - 2], menu) != null);
+    }
+}
