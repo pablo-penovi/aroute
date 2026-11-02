@@ -8,7 +8,8 @@ const pipewire = @import("pipewire.zig");
 const alsa = @import("alsa.zig");
 const Aliases = @import("aliases.zig").Aliases;
 
-/// `--help`: the same text as the script's, apart from how ALSA MIDI is wired.
+/// `--help`: the same text as the script's, apart from listing `--help` itself
+/// and how ALSA MIDI is wired.
 pub const help =
     \\aroute — two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI.
     \\
@@ -18,6 +19,7 @@ pub const help =
     \\  aroute --save NAME      save all current connections as a profile
     \\  aroute --load NAME [--force]
     \\                          replace all current connections with a profile
+    \\  aroute --help           print this usage and more on profiles and aliases
     \\
     \\Audio is always routed with pw-link. MIDI between two ALSA sequencer ports
     \\is wired through the kernel's ALSA sequencer directly; MIDI involving a
@@ -174,16 +176,20 @@ test "list: real machine with ALSA MIDI and BLE MIDI" {
     , out.written());
 }
 
-test "help: the script's --help, apart from how ALSA MIDI is wired" {
+test "help: the script's --help, apart from listing --help and how ALSA MIDI is wired" {
     const script = @embedFile("testdata/script-help.txt");
+    const load = "replace all current connections with a profile\n";
+    const with_help = try std.mem.replaceOwned(u8, testing.allocator, script, load, load ++
+        "  aroute --help           print this usage and more on profiles and aliases\n");
+    defer testing.allocator.free(with_help);
     const theirs = "uses aconnect; MIDI involving a PipeWire-only port (e.g. BLE MIDI) goes\n" ++
         "through pw-link via PipeWire's Midi-Bridge.\n";
     const ours = "is wired through the kernel's ALSA sequencer directly; MIDI involving a\n" ++
         "PipeWire-only port (e.g. BLE MIDI) goes through pw-link via PipeWire's\n" ++
         "Midi-Bridge.\n";
-    const want = try std.mem.replaceOwned(u8, testing.allocator, script, theirs, ours);
+    const want = try std.mem.replaceOwned(u8, testing.allocator, with_help, theirs, ours);
     defer testing.allocator.free(want);
-    try testing.expect(!std.mem.eql(u8, script, want));
+    try testing.expect(!std.mem.eql(u8, script, with_help) and !std.mem.eql(u8, with_help, want));
     try testing.expectEqualStrings(want, help);
 }
 

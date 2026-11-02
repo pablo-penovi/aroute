@@ -44,7 +44,7 @@ Available only while picking (Connect, Disconnect, Load, Delete), never on the h
 
 Besides picking and search above, these are deliberate; everything else matches the script.
 
-- **`--help`** says MIDI between two ALSA Ports is wired through the ALSA sequencer directly, not with `aconnect` ([ADR 0002](adr/0002-talk-to-the-alsa-sequencer-through-the-kernel.md)); the rest of the text is the script's.
+- **`--help`** lists `aroute --help` among the commands, and says MIDI between two ALSA Ports is wired through the ALSA sequencer directly, not with `aconnect` ([ADR 0002](adr/0002-talk-to-the-alsa-sequencer-through-the-kernel.md)); the rest of the text is the script's.
 - **`--list`** indents every snapshot line (the script indents only the first) and exits 0 when there are no Connections.
 - **`--save`** with no Connections saves an empty Profile, says `Saved …` and exits 0 (the script writes it too, but exits 1 without a word). **`--profiles`** also lists names starting with `.`.
 - **Fitting the screen**: nothing wraps. Names, the title, the menu and the profiles directory in the PROFILES header are cut with `…` by display width, so wide characters and combining marks line up. A home screen that doesn't fit scrolls (see Screens) instead of ending in `… N more (enlarge the terminal)`, and so does the missing-Devices screen on Load.
