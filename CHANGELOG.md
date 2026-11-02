@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-11-01
+
+### Added
+
+- `aroute` with no arguments starts the TUI on its home screen, as the script draws it: the title with the current Profile (`default` at startup) and a red `(modified)` once the Connections differ from the ones it was loaded or saved with, the `● audio` / `● MIDI` legend, the FROM and TO columns (audio before MIDI, hidden Endpoints left out), the CONNECTIONS list coloured by Kind, the menu and the status line. The graph is re-read every second, Esc quits, and the menu's other keys say they are not implemented yet.
+- The terminal is put back as it was on Esc, on Ctrl-C or SIGTERM (exit status 130, as in the script) and on errors. Without a terminal, the TUI doesn't start: `the TUI needs a terminal (see --help for non-interactive use)`.
+- When the home screen doesn't fit, `PgUp`/`PgDn` scroll it, with `↑ N more (PgUp)` / `↓ N more (PgDn)` rows saying what is left out. The script instead cuts it off with `… N more (enlarge the terminal)`.
+- It redraws when the terminal is resized. Names are cut with `…` by display width, so wide (e.g. CJK) characters and combining marks line up, and no row is wider than the terminal, menu and title included (the script lets those wrap).
+- If the graph can't be re-read, the last one stays on screen and the status line says `✗ cannot read the PipeWire graph (is PipeWire running?)` until a read works again.
+
 ## [0.0.5] - 2026-11-01
 
 ### Added

@@ -31,7 +31,7 @@ Available only while picking (Connect, Disconnect, Load, Delete), never on the h
 
 ## Screens
 
-- **Home**: both columns and the connection list. When it doesn't fit, `PgUp`/`PgDn` scroll it (no letters, no search).
+- **Home**: both columns and the connection list. When it doesn't fit, `PgUp`/`PgDn` scroll it (no letters, no search), and a row at the top and bottom says how many lines are left out (`↑ 4 more (PgUp)`, `↓ 12 more (PgDn)`).
 - **Connect**: the connection list is replaced by a one-line summary ("7 connections") so the columns get the full height.
 
 ## Graph state
