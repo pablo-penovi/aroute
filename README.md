@@ -61,7 +61,7 @@ Coverage output is written to `coverage/`; open `coverage/merged/kcov-merged/ind
 
 1. In a PR, set the version in `build.zig.zon` (`.version = "x.y.z"`) and put the changes in `CHANGELOG.md` under a `## [x.y.z] - YYYY-MM-DD` heading.
 2. Merge the PR. The merge commit is tagged as the next release candidate of that version: `vx.y.z-rc1`, then `vx.y.z-rc2` on the next merge at the same version, and so on. No release is created. Once `vx.y.z` is released, merges at that version are no longer tagged; bump the version.
-3. To release, run the **Promote tag to release** workflow from the Actions tab (or `gh workflow run promote.yml -f tag=vx.y.z-rcN`) with the **latest** release candidate of a version newer than the current latest release. It builds static binaries for `x86_64-linux` and `aarch64-linux` at that tag and publishes release `vx.y.z` at the same commit (creating the `vx.y.z` tag), with the notes from the `## [x.y.z]` section of `CHANGELOG.md` on `main`.
+3. To release, run the **Promote tag to release** workflow from the Actions tab (or `gh workflow run promote.yml -f tag=vx.y.z-rcN`) with the **latest** release candidate of a version newer than the current latest release. It builds static binaries for `x86_64-linux` and `aarch64-linux` at that tag and publishes release `vx.y.z` at the same commit (creating the `vx.y.z` tag), with release notes from `CHANGELOG.md` on `main`: every section after the latest release up to and including `## [x.y.z]`, newest first, so a release lists everything since the previous one (`.github/scripts/changelog-notes.sh --since PREVIOUS x.y.z` prints them).
 
 The `0.0.0` placeholder is never tagged.
 
