@@ -11,7 +11,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `aroute --load NAME [--force]` makes the whole graph match a Profile, as the script does: every current Link not in it is undone, then each of its Links that is not there yet is made (`aconnect` between two ALSA Ports, otherwise `pw-link`, through the Midi-Bridge for ALSA MIDI; one that already exists counts as made). It prints `✓ Loaded 'NAME': N added, N removed[, N failed][ · skipped (not present): …]`, naming each missing Device by its `# device` label, or `<label> (port <name>)` when only a Port is missing.
-- If audio Devices from the Profile are missing, they are listed on stderr; `--force` hooks up only the available Connections, on a terminal you are asked `Continue and hook up only the available connections? [y/N]`, and otherwise nothing is loaded. Missing MIDI Devices alone never block. `pw-link` is needed to load.
+- If audio Devices from the Profile are missing, they are listed on stderr; `--force` hooks up only the available Connections, on a terminal you are asked `Continue and hook up only the available connections? [y/N]`, and otherwise nothing is loaded. Missing MIDI Devices alone never block.
+
+### Changed
+
+- Every command first checks that `pw-dump`, `pw-link` and `aconnect` are installed (on `PATH` and executable), as the script does. If any is missing, aroute names them, says which package to install (PipeWire's tools or `alsa-utils`), and exits 1.
 
 ## [0.0.4] - 2026-11-01
 

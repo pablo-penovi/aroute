@@ -14,6 +14,9 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
+    // As in the script, every command needs every tool.
+    const missing = try tools.missing(arena, io, init.environ_map.get("PATH") orelse "");
+    if (missing.len > 0) dieMissing(io, missing);
     const config_dir = try configDir(arena, init.environ_map.*);
 
     const profiles_dir = try std.fs.path.join(arena, &.{ config_dir, "profiles" });
@@ -193,6 +196,15 @@ fn configDir(arena: Allocator, env: std.process.Environ.Map) Allocator.Error![]c
         if (xdg.len > 0) return std.fs.path.join(arena, &.{ xdg, "aroute" });
     }
     return std.fs.path.join(arena, &.{ env.get("HOME") orelse "", ".config", "aroute" });
+}
+
+fn dieMissing(io: Io, missing: []const tools.Tool) noreturn {
+    var buf: [1024]u8 = undefined;
+    var stderr = Io.File.stderr().writer(io, &buf);
+    stderr.interface.writeAll("aroute: ") catch {};
+    tools.explainMissing(&stderr.interface, missing) catch {};
+    stderr.interface.flush() catch {};
+    std.process.exit(1);
 }
 
 fn die(io: Io, comptime fmt: []const u8, args: anytype) noreturn {

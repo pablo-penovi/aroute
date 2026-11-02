@@ -7,6 +7,58 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const graph = @import("graph.zig");
 
+/// The tools aroute runs, checked for at startup.
+pub const Tool = enum {
+    @"pw-dump",
+    @"pw-link",
+    aconnect,
+
+    /// Where it comes from, and what to install to get it.
+    const Source = struct { from: []const u8, install: []const u8 };
+
+    const sources = [_]struct { tools: []const Tool, source: Source }{
+        .{ .tools = &.{ .@"pw-dump", .@"pw-link" }, .source = .{
+            .from = "PipeWire",
+            .install = "pipewire (Arch), pipewire-bin (Debian, Ubuntu) or pipewire-utils (Fedora)",
+        } },
+        .{ .tools = &.{.aconnect}, .source = .{ .from = "ALSA", .install = "alsa-utils" } },
+    };
+};
+
+/// The tools not found as executables in the directories of `path` (a
+/// `$PATH` value, where an empty entry is the current directory).
+pub fn missing(arena: Allocator, io: Io, path: []const u8) Allocator.Error![]const Tool {
+    var list: std.ArrayList(Tool) = .empty;
+    for (std.enums.values(Tool)) |tool| {
+        var dirs = std.mem.splitScalar(u8, path, ':');
+        const found = while (dirs.next()) |dir| {
+            const file = try std.fs.path.join(arena, &.{ if (dir.len == 0) "." else dir, @tagName(tool) });
+            if (Io.Dir.cwd().access(io, file, .{ .execute = true })) |_| break true else |_| {}
+        } else false;
+        if (!found) try list.append(arena, tool);
+    }
+    return list.items;
+}
+
+/// What is missing and what to install for it, one line each, as
+///
+///     missing dependencies: pw-link, aconnect
+///       pw-dump and pw-link come with PipeWire: install pipewire (Arch), …
+///       aconnect comes with ALSA: install alsa-utils
+pub fn explainMissing(w: *Io.Writer, tools: []const Tool) Io.Writer.Error!void {
+    try w.print("missing {s}: ", .{if (tools.len == 1) "dependency" else "dependencies"});
+    for (tools, 0..) |t, i| try w.print("{s}{t}", .{ if (i > 0) ", " else "", t });
+    try w.writeByte('\n');
+    for (Tool.sources) |s| {
+        for (s.tools) |t| {
+            if (std.mem.findScalar(Tool, tools, t) != null) break;
+        } else continue;
+        try w.writeAll("  ");
+        for (s.tools, 0..) |t, i| try w.print("{s}{t}", .{ if (i == 0) "" else if (i + 1 == s.tools.len) " and " else ", ", t });
+        try w.print(" come{s} with {s}: install {s}\n", .{ if (s.tools.len == 1) "s" else "", s.source.from, s.source.install });
+    }
+}
+
 pub const Error = error{
     /// The tool is not installed (not on PATH).
     MissingTool,
@@ -95,4 +147,42 @@ fn run(gpa: Allocator, io: Io, argv: []const []const u8) Error![]u8 {
         return error.ToolFailed;
     }
     return result.stdout;
+}
+
+const testing = std.testing;
+
+test "missing: executables on PATH, empty entries meaning the current directory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try tmp.dir.createDirPath(testing.io, "a");
+    try tmp.dir.createDirPath(testing.io, "b");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "a/pw-dump", .data = "", .flags = .{ .permissions = .executable_file } });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "b/pw-link", .data = "", .flags = .{ .permissions = .executable_file } });
+    // Not executable.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "b/aconnect", .data = "" });
+
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fmt.allocPrint(arena, "/nonexistent:{s}/a::{s}/b", .{ root, root });
+    try testing.expectEqualSlices(Tool, &.{.aconnect}, try missing(arena, testing.io, path));
+    try testing.expectEqualSlices(Tool, &.{ .@"pw-dump", .@"pw-link", .aconnect }, try missing(arena, testing.io, ""));
+}
+
+test "explainMissing: what to install for each" {
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try explainMissing(&out.writer, &.{ .@"pw-link", .aconnect });
+    try testing.expectEqualStrings(
+        \\missing dependencies: pw-link, aconnect
+        \\  pw-dump and pw-link come with PipeWire: install pipewire (Arch), pipewire-bin (Debian, Ubuntu) or pipewire-utils (Fedora)
+        \\  aconnect comes with ALSA: install alsa-utils
+        \\
+    , out.written());
+
+    out.clearRetainingCapacity();
+    try explainMissing(&out.writer, &.{.aconnect});
+    try testing.expectEqualStrings("missing dependency: aconnect\n  aconnect comes with ALSA: install alsa-utils\n", out.written());
 }
