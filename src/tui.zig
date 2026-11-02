@@ -1,6 +1,7 @@
 //! The interactive TUI, as the script's `tui`: the home screen, re-read
-//! every second, Connect and Disconnect, and `/` search in them (`search.zig`).
-//! Drawing is in `screen.zig`, the terminal in `term.zig`.
+//! every second; Connect and Disconnect; saving, loading and deleting
+//! Profiles; and `/` search in the pickers (`search.zig`). Drawing is in
+//! `screen.zig`, the terminal in `term.zig`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -8,6 +9,9 @@ const Io = std.Io;
 const graph = @import("graph.zig");
 const connect = @import("connect.zig");
 const picker = @import("picker.zig");
+const profile = @import("profile.zig");
+const prompt = @import("prompt.zig");
+const load = @import("load.zig");
 const search = @import("search.zig");
 const screen = @import("screen.zig");
 const term = @import("term.zig");
@@ -50,7 +54,12 @@ pub const App = struct {
     current: Scan,
     /// The snapshot the current Profile was loaded or saved with.
     baseline: []u8,
-    profile: []const u8 = "default",
+    /// The current Profile's name.
+    profile: std.ArrayList(u8),
+    store: profile.Store,
+    /// What the Load, Delete and confirmation screens show, read when they
+    /// open, so it lasts from one frame to the next.
+    held: std.heap.ArenaAllocator,
     /// The status line: the result of the last action.
     status_text: std.ArrayList(u8) = .empty,
     status_err: bool = false,
@@ -64,6 +73,10 @@ pub const App = struct {
         home,
         connect: Picking,
         disconnect: Disconnecting,
+        save: Saving,
+        /// Load or Delete.
+        choose: Choosing,
+        confirm: Confirming,
     };
 
     /// Where Connect is at. The graph is not re-read meanwhile, so the
@@ -89,16 +102,70 @@ pub const App = struct {
         search: search.Search = .{},
     };
 
-    /// Reads the graph; its snapshot is the baseline of the `default` Profile.
-    pub fn init(gpa: Allocator, scanner: anytype) ScanError!App {
+    /// Typing the name to save as; then, if there is a Profile by that
+    /// name, whether to overwrite it.
+    pub const Saving = struct {
+        name: prompt.Field,
+        /// The answer to the overwrite question, once it is asked.
+        overwrite: ?prompt.Field = null,
+    };
+
+    /// Picking a Profile to load or delete.
+    pub const Choosing = struct {
+        action: screen.Profiles.Action,
+        /// Every Profile, in `held`: listed when the screen opens, and again
+        /// after each deletion.
+        entries: []const profile.Store.Entry,
+        /// The list's page.
+        page: usize = 0,
+        search: search.Search = .{},
+        /// Delete only: the `(y/n)` question about a Profile, while it is asked.
+        asking: ?Asking = null,
+
+        /// The Profiles listed: those whose name matches the search.
+        fn shown(c: *const Choosing, arena: Allocator) Allocator.Error![]const profile.Store.Entry {
+            var list: std.ArrayList(profile.Store.Entry) = .empty;
+            for (c.entries) |e| {
+                if (search.matches(c.search.query(), &.{e.name})) try list.append(arena, e);
+            }
+            return list.items;
+        }
+    };
+
+    pub const Asking = struct {
+        name: prompt.Field,
+        answer: prompt.Field = .{},
+    };
+
+    /// Asking whether to load a Profile some of whose audio Devices are not there.
+    pub const Confirming = struct {
+        name: prompt.Field,
+        /// In `held`.
+        missing_audio: []const []const u8,
+        missing_midi: []const []const u8,
+        /// How many of its Links can be made.
+        available: usize,
+        /// The body's scroll.
+        scroll: usize = 0,
+    };
+
+    /// Reads the graph; its snapshot is the baseline of the `default`
+    /// Profile. Profiles are saved to, loaded from and deleted in `store`.
+    pub fn init(gpa: Allocator, scanner: anytype, store: profile.Store) ScanError!App {
         var current: Scan = try .read(gpa, scanner);
         errdefer current.deinit();
-        return .{ .gpa = gpa, .current = current, .baseline = try gpa.dupe(u8, current.snapshot) };
+        const baseline = try gpa.dupe(u8, current.snapshot);
+        errdefer gpa.free(baseline);
+        var name: std.ArrayList(u8) = .empty;
+        try name.appendSlice(gpa, "default");
+        return .{ .gpa = gpa, .current = current, .baseline = baseline, .profile = name, .store = store, .held = .init(gpa) };
     }
 
     pub fn deinit(app: *App) void {
         app.current.deinit();
         app.gpa.free(app.baseline);
+        app.profile.deinit(app.gpa);
+        app.held.deinit();
         app.status_text.deinit(app.gpa);
     }
 
@@ -113,6 +180,26 @@ pub const App = struct {
             error.OutOfMemory => return error.OutOfMemory,
         };
         app.replace(fresh);
+    }
+
+    /// Re-reads the graph, as `refresh`; whether it could.
+    fn reread(app: *App, scanner: anytype) Allocator.Error!bool {
+        try app.refresh(scanner);
+        return !app.unreadable;
+    }
+
+    /// The graph as it is now is what the Profile `name`, now the current
+    /// one, was loaded or saved with.
+    fn becomes(app: *App, name: []const u8) Allocator.Error!void {
+        const baseline = try app.gpa.dupe(u8, app.current.snapshot);
+        app.gpa.free(app.baseline);
+        app.baseline = baseline;
+        try app.setProfile(name);
+    }
+
+    fn setProfile(app: *App, name: []const u8) Allocator.Error!void {
+        app.profile.clearRetainingCapacity();
+        try app.profile.appendSlice(app.gpa, name);
     }
 
     fn replace(app: *App, fresh: Scan) void {
@@ -144,7 +231,7 @@ pub const App = struct {
     pub fn home(app: App) screen.Home {
         return .{
             .graph = app.current.graph,
-            .profile = app.profile,
+            .profile = app.profile.items,
             .modified = app.modified(),
             .status = app.status(),
             .scroll = app.scroll,
@@ -161,7 +248,7 @@ pub const App = struct {
         const to = if (p.focus == .to) focused_list else try screen.column(arena, g, .to);
         return .{
             .graph = g,
-            .profile = app.profile,
+            .profile = app.profile.items,
             .modified = app.modified(),
             .status = app.status(),
             .focus = p.focus,
@@ -191,7 +278,7 @@ pub const App = struct {
         const d = app.mode.disconnect;
         return .{
             .graph = app.current.graph,
-            .profile = app.profile,
+            .profile = app.profile.items,
             .modified = app.modified(),
             .status = app.status(),
             .shown = try app.listed(arena),
@@ -212,12 +299,61 @@ pub const App = struct {
         return list.items;
     }
 
+    /// The home screen with Save's question on the status line. Only while saving.
+    fn saveScreen(app: *const App, arena: Allocator) Allocator.Error!screen.Home {
+        const s = &app.mode.save;
+        var h = app.home();
+        h.prompt = if (s.overwrite) |*answer| .{
+            .question = try std.fmt.allocPrint(arena, "Profile '{s}' exists. Overwrite? (y/n) ", .{s.name.text()}),
+            .typed = answer.text(),
+        } else .{ .question = "Save profile as (Esc to cancel): ", .typed = s.name.text() };
+        return h;
+    }
+
+    /// The Load or Delete screen. Only while picking a Profile.
+    pub fn profilesScreen(app: *const App, arena: Allocator) Allocator.Error!screen.Profiles {
+        const c = &app.mode.choose;
+        return .{
+            .profile = app.profile.items,
+            .modified = app.modified(),
+            .status = app.status(),
+            .action = c.action,
+            .dir = app.store.dir,
+            .shown = try c.shown(arena),
+            .any = c.entries.len > 0,
+            .page = c.page,
+            .search = c.search,
+            .prompt = if (c.asking) |*a| .{
+                .question = try std.fmt.allocPrint(arena, "Delete profile '{s}'? (y/n) ", .{a.name.text()}),
+                .typed = a.answer.text(),
+            } else null,
+        };
+    }
+
+    /// The confirmation before loading. Only while asking.
+    pub fn missingScreen(app: *const App) screen.Missing {
+        const c = &app.mode.confirm;
+        return .{
+            .profile = app.profile.items,
+            .modified = app.modified(),
+            .status = app.status(),
+            .name = c.name.text(),
+            .audio = c.missing_audio,
+            .midi = c.missing_midi,
+            .available = c.available,
+            .scroll = c.scroll,
+        };
+    }
+
     /// The screen of `size`, one string per row.
-    pub fn rows(app: App, arena: Allocator, size: screen.Size) screen.Error![]const []const u8 {
+    pub fn rows(app: *const App, arena: Allocator, size: screen.Size) screen.Error![]const []const u8 {
         return switch (app.mode) {
             .home => screen.home(arena, app.home(), size),
             .connect => screen.connect(arena, try app.connectScreen(arena), size),
             .disconnect => screen.disconnect(arena, try app.disconnectScreen(arena), size),
+            .save => screen.home(arena, try app.saveScreen(arena), size),
+            .choose => screen.profiles(arena, try app.profilesScreen(arena), size),
+            .confirm => screen.missing(arena, app.missingScreen(), size),
         };
     }
 
@@ -232,6 +368,9 @@ pub const App = struct {
             .home => return app.homeKey(arena, k, size),
             .connect => try app.connectKey(arena, k, size, scanner, wiring),
             .disconnect => try app.disconnectKey(arena, k, size, scanner, wiring),
+            .save => try app.saveKey(arena, k, scanner),
+            .choose => try app.choosingKey(arena, k, size, scanner, wiring),
+            .confirm => try app.confirmKey(arena, k, size, scanner, wiring),
         }
         return .stay;
     }
@@ -256,7 +395,17 @@ pub const App = struct {
                     app.status_text.clearRetainingCapacity();
                     app.mode = .{ .disconnect = .{} };
                 },
-                '3'...'5' => try app.say(false, "{s}", .{not_yet[c - '3']}),
+                '3' => {
+                    app.status_text.clearRetainingCapacity();
+                    // The current Profile's name to start with, unless it is `default`.
+                    const current = app.profile.items;
+                    app.mode = .{ .save = .{ .name = .init(if (std.mem.eql(u8, current, "default")) "" else current) } };
+                },
+                '4', '5' => {
+                    app.status_text.clearRetainingCapacity();
+                    const entries = try app.listProfiles();
+                    app.mode = .{ .choose = .{ .action = if (c == '4') .load else .delete, .entries = entries } };
+                },
                 else => {},
             },
             else => {},
@@ -264,11 +413,173 @@ pub const App = struct {
         return .stay;
     }
 
-    const not_yet = [_][]const u8{
-        "Save profile is not implemented yet",
-        "Load profile is not implemented yet",
-        "Delete profile is not implemented yet",
-    };
+    /// Every Profile, in `held`, which is emptied first.
+    fn listProfiles(app: *App) Allocator.Error![]const profile.Store.Entry {
+        _ = app.held.reset(.retain_capacity);
+        return app.store.entries(app.held.allocator());
+    }
+
+    fn saveKey(app: *App, arena: Allocator, k: term.Key, scanner: anytype) !void {
+        const s = &app.mode.save;
+        if (s.overwrite) |*answer| switch (answer.key(k)) {
+            .typing => {},
+            .cancel => app.cancel(),
+            .done => {
+                const name = s.name;
+                const yes = answer.yes();
+                app.mode = .home;
+                if (yes) try app.saveAs(arena, name.text(), scanner) else try app.say(false, "Not saved.", .{});
+            },
+        } else switch (s.name.key(k)) {
+            .typing => {},
+            .cancel => app.cancel(),
+            .done => {
+                const name: prompt.Field = .init(std.mem.trim(u8, s.name.text(), " "));
+                if (name.len == 0) {
+                    app.mode = .home;
+                } else if (!std.mem.eql(u8, name.text(), app.profile.items) and try app.store.exists(arena, name.text())) {
+                    s.* = .{ .name = name, .overwrite = .{} };
+                } else {
+                    app.mode = .home;
+                    try app.saveAs(arena, name.text(), scanner);
+                }
+            },
+        }
+    }
+
+    /// `Esc` on a question: back home, saying nothing.
+    fn cancel(app: *App) void {
+        app.status_text.clearRetainingCapacity();
+        app.mode = .home;
+    }
+
+    /// Re-reads the graph and saves it as the Profile `name`, which becomes
+    /// the current one.
+    fn saveAs(app: *App, arena: Allocator, name: []const u8, scanner: anytype) !void {
+        if (!try app.reread(scanner)) return;
+        app.store.save(arena, name, app.current.graph) catch |err| switch (err) {
+            error.Unwritable => return app.say(true, "✗ could not write {s}", .{try app.store.path(arena, name)}),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try app.becomes(name);
+        try app.say(false, "✓ Saved profile '{s}'", .{name});
+    }
+
+    fn choosingKey(app: *App, arena: Allocator, k: term.Key, size: screen.Size, scanner: anytype, wiring: anytype) !void {
+        const c = &app.mode.choose;
+        if (c.asking) |*a| return switch (a.answer.key(k)) {
+            .typing => {},
+            .cancel => {
+                app.status_text.clearRetainingCapacity();
+                c.asking = null;
+            },
+            .done => {
+                const name = a.name;
+                if (a.answer.yes()) try app.deleteProfile(arena, name.text()) else try app.say(false, "Not deleted.", .{});
+                // The list as it is now, without the search, so the status line shows what happened.
+                const page = if (c.search.state == .off) c.page else 0;
+                c.* = .{ .action = c.action, .entries = try app.listProfiles(), .page = page };
+            },
+        };
+        switch (c.search.key(k)) {
+            .pass => {},
+            .changed => {
+                c.page = 0;
+                return;
+            },
+            .handled => return,
+            .enter => {
+                const list = try c.shown(arena);
+                if (list.len == 1) try app.pickProfile(arena, list[0].name, scanner, wiring);
+                return;
+            },
+        }
+        const list = try c.shown(arena);
+        const pages: picker.Pages = .init(list.len, screen.profileRows(size));
+        switch (k) {
+            .esc => app.cancel(),
+            .page_down => c.page = pages.next(c.page),
+            .page_up => c.page = pages.prev(c.page),
+            .char => |ch| try app.pickProfile(arena, list[pages.pick(c.page, ch) orelse return].name, scanner, wiring),
+            else => {},
+        }
+    }
+
+    /// Loads the Profile `name`, or asks whether to delete it.
+    fn pickProfile(app: *App, arena: Allocator, name: []const u8, scanner: anytype, wiring: anytype) !void {
+        const c = &app.mode.choose;
+        switch (c.action) {
+            .load => try app.loadProfile(arena, name, true, scanner, wiring),
+            .delete => c.asking = .{ .name = .init(name) },
+        }
+    }
+
+    /// As `rm -f`; deleting the current Profile makes it `default` again.
+    fn deleteProfile(app: *App, arena: Allocator, name: []const u8) !void {
+        app.store.delete(arena, name) catch |err| switch (err) {
+            error.Undeletable => return app.say(true, "✗ could not delete {s}", .{try app.store.path(arena, name)}),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (std.mem.eql(u8, name, app.profile.items)) try app.setProfile("default");
+        try app.say(false, "✓ Deleted profile '{s}'", .{name});
+    }
+
+    /// Re-reads the graph and makes it match the Profile `name`, which
+    /// becomes the current one. With `ask`, if audio Devices of it are not
+    /// there, asks first.
+    fn loadProfile(app: *App, arena: Allocator, picked: []const u8, ask: bool, scanner: anytype, wiring: anytype) !void {
+        // `picked` may be in `held`, which the confirmation empties.
+        const name: prompt.Field = .init(picked);
+        app.mode = .home;
+        if (!try app.reread(scanner)) return;
+        const saved = app.store.read(arena, name.text()) catch |err| switch (err) {
+            error.Unreadable => return app.say(true, "✗ cannot read profile '{s}'", .{name.text()}),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const p = try load.plan(arena, app.current.graph, saved);
+        if (ask and p.missing_audio.len > 0) {
+            _ = app.held.reset(.retain_capacity);
+            const held = app.held.allocator();
+            app.mode = .{ .confirm = .{
+                .name = name,
+                .missing_audio = try dupeAll(held, p.missing_audio),
+                .missing_midi = try dupeAll(held, p.missing_midi),
+                .available = p.wanted.len,
+            } };
+            return;
+        }
+        const result = try load.apply(arena, app.current.graph, p, Applying(@TypeOf(wiring)){ .arena = arena, .wiring = wiring });
+        var summary: std.Io.Writer.Allocating = .init(arena);
+        load.summary(&summary.writer, name.text(), p, result, .{ .on = screen.style.red, .off = screen.style.off }) catch return error.OutOfMemory;
+        try app.say(false, "{s}", .{summary.written()});
+        // Show what it made now, and take that as the Profile, as the script does.
+        try app.refresh(scanner);
+        try app.becomes(name.text());
+    }
+
+    fn confirmKey(app: *App, arena: Allocator, k: term.Key, size: screen.Size, scanner: anytype, wiring: anytype) !void {
+        const c = &app.mode.confirm;
+        switch (k) {
+            .char => |ch| switch (ch) {
+                // Planned again: the graph is re-read first.
+                'y', 'Y' => try app.loadProfile(arena, c.name.text(), false, scanner, wiring),
+                'n', 'N' => try app.notLoaded(),
+                else => {},
+            },
+            .esc => try app.notLoaded(),
+            .page_down, .page_up => {
+                const total = (try screen.missingBody(arena, app.missingScreen())).len;
+                const height = screen.bodyRows(size);
+                c.scroll = if (k == .page_down) screen.pageDown(total, height, c.scroll) else screen.pageUp(total, height, c.scroll);
+            },
+            else => {},
+        }
+    }
+
+    fn notLoaded(app: *App) Allocator.Error!void {
+        app.mode = .home;
+        try app.say(false, "Not loaded.", .{});
+    }
 
     fn connectKey(app: *App, arena: Allocator, k: term.Key, size: screen.Size, scanner: anytype, wiring: anytype) !void {
         const p = &app.mode.connect;
@@ -450,13 +761,36 @@ fn other(d: graph.Direction) graph.Direction {
     return if (d == .from) .to else .from;
 }
 
+fn dupeAll(arena: Allocator, strings: []const []const u8) Allocator.Error![]const []const u8 {
+    const out = try arena.alloc([]const u8, strings.len);
+    for (strings, out) |s, *o| o.* = try arena.dupe(u8, s);
+    return out;
+}
+
+/// The TUI's `wiring` as `load.apply` takes it: a Link not made, or not
+/// undone, is `error.ToolFailed`.
+fn Applying(comptime Wiring: type) type {
+    return struct {
+        arena: Allocator,
+        wiring: Wiring,
+
+        pub fn connect(a: @This(), e: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
+            if (try a.wiring.connect(a.arena, e) != null) return error.ToolFailed;
+        }
+
+        pub fn disconnect(a: @This(), e: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
+            if (!try a.wiring.disconnect(a.arena, e)) return error.ToolFailed;
+        }
+    };
+}
+
 /// Runs the TUI until Esc. `scanner.scan(arena)` reads the graph; the first
 /// read happens before the screen is taken over, so its error is the
 /// caller's. `wiring.connect(arena, ends)` makes a Link and returns null, or
 /// why it could not, allocated in `arena`; `wiring.disconnect(arena, ends)`
-/// undoes one and returns whether it did.
-pub fn run(gpa: Allocator, io: Io, scanner: anytype, wiring: anytype) !void {
-    var app: App = try .init(gpa, scanner);
+/// undoes one and returns whether it did. Profiles are in `store`.
+pub fn run(gpa: Allocator, io: Io, scanner: anytype, wiring: anytype, store: profile.Store) !void {
+    var app: App = try .init(gpa, scanner, store);
     defer app.deinit();
 
     try term.enter();
@@ -512,6 +846,45 @@ fn draw(w: *Io.Writer, rows: []const []const u8, size: screen.Size, clear: bool)
 
 const testing = std.testing;
 
+/// A frame arena for the out-of-memory tests: every allocation goes to
+/// `gpa` on its own, so a failing `gpa` fails each one. (An `ArenaAllocator`
+/// serves most from memory it already has, so which ones fail would depend
+/// on its chunk sizes.) Everything is freed by `deinit`.
+const EveryAlloc = struct {
+    gpa: Allocator,
+    /// Kept with an allocator that never fails.
+    live: std.ArrayList([]u8) = .empty,
+    alignments: std.ArrayList(std.mem.Alignment) = .empty,
+
+    fn allocator(e: *EveryAlloc) Allocator {
+        // Growing is a new allocation, which can fail too.
+        return .{ .ptr = e, .vtable = &.{ .alloc = alloc, .resize = Allocator.noResize, .remap = Allocator.noRemap, .free = free } };
+    }
+
+    fn deinit(e: *EveryAlloc) void {
+        for (e.live.items, e.alignments.items) |m, a| e.gpa.rawFree(m, a, @returnAddress());
+        e.live.deinit(testing.allocator);
+        e.alignments.deinit(testing.allocator);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const e: *EveryAlloc = @ptrCast(@alignCast(ctx));
+        const ptr = e.gpa.rawAlloc(len, alignment, ret_addr) orelse return null;
+        e.live.append(testing.allocator, ptr[0..len]) catch @panic("OOM");
+        e.alignments.append(testing.allocator, alignment) catch @panic("OOM");
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const e: *EveryAlloc = @ptrCast(@alignCast(ctx));
+        var i: usize = 0;
+        while (e.live.items[i].ptr != memory.ptr) i += 1;
+        _ = e.live.swapRemove(i);
+        _ = e.alignments.swapRemove(i);
+        e.gpa.rawFree(memory, alignment, ret_addr);
+    }
+};
+
 /// Hands out graphs in turn; `null` is a failed read.
 const FakeScanner = struct {
     graphs: []const ?graph.Graph,
@@ -524,6 +897,13 @@ const FakeScanner = struct {
         return s.graphs[i] orelse error.Unreadable;
     }
 };
+
+fn fixedClock(_: Allocator, _: Io) Allocator.Error![]const u8 {
+    return "2026-11-01 16:45:00";
+}
+
+/// For the tests that don't touch Profiles.
+const no_profiles: profile.Store = .{ .io = testing.io, .dir = "/nonexistent/aroute/profiles", .clock = fixedClock };
 
 const pw_ep = graph.Endpoint{ .label = "x", .kind = .audio, .direction = .from, .ports = .{ .pw = &.{} } };
 
@@ -540,7 +920,7 @@ const link_b = [_]graph.Link{.{ .ends = .{ .pw = .{ 3, 2 } }, .from_name = "pw:c
 test "App: (modified) while the snapshot differs from the one at startup" {
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ connected(&link_a), connected(&link_b), connected(&.{}), connected(&link_a) }, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     try testing.expectEqualStrings("default", app.home().profile);
@@ -556,7 +936,7 @@ test "App: (modified) while the snapshot differs from the one at startup" {
 test "App: a failed re-read keeps the last graph and says so until one works" {
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ connected(&link_a), null, connected(&link_b) }, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     try app.refresh(scanner);
@@ -573,7 +953,7 @@ test "App: a failed re-read keeps the last graph and says so until one works" {
 fn initAndRefresh(gpa: Allocator) !void {
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ connected(&link_a), connected(&link_b) }, .next = &n };
-    var app: App = try .init(gpa, scanner);
+    var app: App = try .init(gpa, scanner, no_profiles);
     defer app.deinit();
     try app.refresh(scanner);
 }
@@ -584,10 +964,10 @@ test "App: running out of memory leaks nothing" {
 
 test "App: the first read failing is an error" {
     var n: usize = 0;
-    try testing.expectError(error.Unreadable, App.init(testing.allocator, FakeScanner{ .graphs = &.{null}, .next = &n }));
+    try testing.expectError(error.Unreadable, App.init(testing.allocator, FakeScanner{ .graphs = &.{null}, .next = &n }, no_profiles));
 }
 
-test "App: Esc quits, PgUp/PgDn scroll, the Profile keys are not there yet" {
+test "App: Esc quits, PgUp/PgDn scroll, other keys do nothing" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -595,7 +975,7 @@ test "App: Esc quits, PgUp/PgDn scroll, the Profile keys are not there yet" {
     var endpoints: [20]graph.Endpoint = @splat(pw_ep);
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &endpoints, .connections = &.{} }}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
     // No key here makes a Link.
     var made: std.ArrayList(graph.Ends) = .empty;
@@ -616,11 +996,8 @@ test "App: Esc quits, PgUp/PgDn scroll, the Profile keys are not there yet" {
     for (0..10) |_| _ = try app.key(arena, .page_down, size, scanner, wiring);
     try testing.expectEqual(screen.maxScroll(24, 6), app.scroll);
 
-    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '3' }, size, scanner, wiring));
-    try testing.expectEqualStrings("Save profile is not implemented yet", app.home().status.text);
-    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '5' }, size, scanner, wiring));
-    try testing.expectEqualStrings("Delete profile is not implemented yet", app.home().status.text);
     try testing.expectEqual(.stay, try app.key(arena, .{ .char = 'a' }, size, scanner, wiring));
+    try testing.expectEqual(.stay, try app.key(arena, .{ .char = '6' }, size, scanner, wiring));
     try testing.expectEqual(.stay, try app.key(arena, .enter, size, scanner, wiring));
     try testing.expectEqual(.quit, try app.key(arena, .esc, size, scanner, wiring));
 }
@@ -697,7 +1074,7 @@ test "Connect: from a Source, only what it can be connected to, then connect" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_shuffled, studio }, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     _ = try app.key(arena, .{ .char = '1' }, big, scanner, wiring);
@@ -736,7 +1113,7 @@ test "Connect: Tab starts from a Destination" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     _ = try app.key(arena, .{ .char = '1' }, big, scanner, wiring);
@@ -768,7 +1145,7 @@ test "Connect: a pick that is gone by the time it connects" {
     for ([_]bool{ false, true }) |from_destination| {
         var n: usize = 0;
         const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_without_synth }, .next = &n };
-        var app: App = try .init(testing.allocator, scanner);
+        var app: App = try .init(testing.allocator, scanner, no_profiles);
         defer app.deinit();
         _ = try app.key(arena, .{ .char = '1' }, big, scanner, wiring);
         if (from_destination) {
@@ -796,7 +1173,7 @@ test "Connect: a Link the tool can't make" {
     const wiring: FakeWiring = .{ .made = &made, .fail = &.{.{ .pw = .{ 1, 5 } }} };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     for ("1aa") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
@@ -815,7 +1192,7 @@ test "Connect: a Destination with no Ports to wire" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &.{} }}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     for ("1aa") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
@@ -833,7 +1210,7 @@ test "Connect: the graph can't be re-read" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ studio, null }, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     for ("1aa") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
@@ -850,7 +1227,7 @@ test "Connect: Esc goes back a step, then home" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     try app.say(false, "✓ earlier", .{});
@@ -880,7 +1257,7 @@ test "Connect: PgUp/PgDn page the focused column, letters from `a` on each page"
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &.{} }}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     // 12 rows: 7 for the body, 4 for the columns.
@@ -914,13 +1291,13 @@ test "Connect: PgUp/PgDn page the focused column, letters from `a` on each page"
 
 fn connectAndFail(gpa: Allocator, gone: bool) !void {
     // The frame arena runs out of memory too.
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    var arena_state: EveryAlloc = .{ .gpa = gpa };
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var made: std.ArrayList(graph.Ends) = .empty;
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ studio, if (gone) studio_without_synth else studio_shuffled }, .next = &n };
-    var app: App = try .init(gpa, scanner);
+    var app: App = try .init(gpa, scanner, no_profiles);
     defer app.deinit();
     for ("1ba") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, FakeWiring{ .made = &made });
 }
@@ -947,7 +1324,7 @@ test "Disconnect: the Connections with letters; picking one undoes all its Links
     const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ studio, studio_more_links, studio_unlinked }, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     try app.say(false, "✓ earlier", .{});
@@ -986,7 +1363,7 @@ test "Disconnect: a Connection that is gone by the time it is undone" {
     for ([_]graph.Graph{ studio_without_synth, studio_unlinked }) |fresh| {
         var n: usize = 0;
         const scanner: FakeScanner = .{ .graphs = &.{ studio, fresh }, .next = &n };
-        var app: App = try .init(testing.allocator, scanner);
+        var app: App = try .init(testing.allocator, scanner, no_profiles);
         defer app.deinit();
         for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
         try testing.expectEqualStrings("✗ Synth → Speakers is gone", app.home().status.text);
@@ -1008,7 +1385,7 @@ test "Disconnect: a Link the tool can't undo" {
     const wiring: FakeWiring = .{ .made = &made, .undone = &undone, .fail = &.{.{ .pw = .{ 2, 4 } }} };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
@@ -1027,7 +1404,7 @@ test "Disconnect: the graph can't be re-read" {
     const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ studio, null }, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
@@ -1044,7 +1421,7 @@ test "Disconnect: Esc goes back; nothing to pick with no Connections" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio_unlinked}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     _ = try app.key(arena, .{ .char = '2' }, big, scanner, wiring);
@@ -1080,7 +1457,7 @@ test "Disconnect: PgUp/PgDn page the Connections, letters from `a` on each page"
     const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &conns }}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     // 10 rows: 5 for the body, 4 for the Connections.
@@ -1114,14 +1491,14 @@ test "Disconnect: PgUp/PgDn page the Connections, letters from `a` on each page"
 
 fn disconnectAndFail(gpa: Allocator, fresh: graph.Graph) !void {
     // The frame arena runs out of memory too.
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    var arena_state: EveryAlloc = .{ .gpa = gpa };
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var made: std.ArrayList(graph.Ends) = .empty;
     var undone: std.ArrayList(graph.Ends) = .empty;
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{ studio, fresh }, .next = &n };
-    var app: App = try .init(gpa, scanner);
+    var app: App = try .init(gpa, scanner, no_profiles);
     defer app.deinit();
     for ("2a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, FakeWiring{ .made = &made, .undone = &undone });
 }
@@ -1139,7 +1516,7 @@ test "App.rows: the screen of the current mode" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     for ([_]?u8{ null, '1', '2' }, [_][]const u8{ "FROM", "FROM", "CONNECTIONS" }, [_][]const u8{ " Disconnect   ", "Connect: pick", "Disconnect: pick" }) |key, body, menu| {
@@ -1167,7 +1544,7 @@ test "Connect search: narrows as you type; Enter on the only match picks it" {
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     try typeKeys(&app, arena, "1/", big, scanner, wiring);
@@ -1208,7 +1585,7 @@ test "Connect search: Enter with several matches keeps the filter, and letters p
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     // Speakers and Headphones.
@@ -1234,7 +1611,7 @@ test "Connect search: Esc cancels, clears, then goes back; Backspace on empty cl
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     try typeKeys(&app, arena, "1/mic", big, scanner, wiring);
@@ -1284,7 +1661,7 @@ test "Connect search: back to page 1 on every key; Esc after a pick goes to its 
     const wiring: FakeWiring = .{ .made = &made };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{.{ .endpoints = &eps, .connections = &.{} }}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     // 4 rows for each column.
@@ -1328,7 +1705,7 @@ test "Disconnect search: either side, Enter on the only match undoes it" {
     const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio_wired}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     // A word on each side.
@@ -1367,7 +1744,7 @@ test "Disconnect search: Esc cancels, clears, then goes back; paging starts over
     const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
     var n: usize = 0;
     const scanner: FakeScanner = .{ .graphs = &.{studio_wired}, .next = &n };
-    var app: App = try .init(testing.allocator, scanner);
+    var app: App = try .init(testing.allocator, scanner, no_profiles);
     defer app.deinit();
 
     // 1 row for the Connections: 3 pages.
@@ -1392,4 +1769,629 @@ test "Disconnect search: Esc cancels, clears, then goes back; paging starts over
     _ = try app.key(arena, .esc, small, scanner, wiring);
     try testing.expect(app.live());
     try testing.expectEqual(0, undone.items.len);
+}
+
+/// A Store in a fresh directory under `.zig-cache/tmp`.
+fn tmpStore(arena: Allocator, tmp: testing.TmpDir) !profile.Store {
+    return .{ .io = testing.io, .dir = try std.fs.path.join(arena, &.{ ".zig-cache", "tmp", &tmp.sub_path }), .clock = fixedClock };
+}
+
+const rig_ports = [_]graph.NamedPort{
+    .{ .name = "pw:synth:out_FL", .direction = .from, .kind = .audio, .pw = 2 },
+    .{ .name = "pw:synth:out_FR", .direction = .from, .kind = .audio, .pw = 3 },
+    .{ .name = "pw:speakers:in_FL", .direction = .to, .kind = .audio, .pw = 4 },
+    .{ .name = "pw:speakers:in_FR", .direction = .to, .kind = .audio, .pw = 5 },
+    .{ .name = "pw:phones:in_FL", .direction = .to, .kind = .audio, .pw = 6 },
+    .{ .name = "pw:phones:in_FR", .direction = .to, .kind = .audio, .pw = 7 },
+};
+const rig_nodes = [_]graph.Node{ .{ .name = "synth", .label = "Synth" }, .{ .name = "speakers", .label = "Speakers" }, .{ .name = "phones", .label = "Headphones" } };
+
+/// The studio, with the Port names a Profile goes by: Synth to Speakers.
+const rig: graph.Graph = .{ .endpoints = &studio_eps, .connections = studio.connections, .nodes = &rig_nodes, .ports = &rig_ports };
+
+const synth_phones = [_]graph.Link{
+    .{ .ends = .{ .pw = .{ 2, 6 } }, .from_name = "pw:synth:out_FL", .to_name = "pw:phones:in_FL" },
+    .{ .ends = .{ .pw = .{ 3, 7 } }, .from_name = "pw:synth:out_FR", .to_name = "pw:phones:in_FR" },
+};
+
+/// Synth to Headphones instead.
+const rig_phones: graph.Graph = .{ .endpoints = &studio_eps, .connections = &.{.{ .from = 1, .to = 3, .links = &synth_phones }}, .nodes = &rig_nodes, .ports = &rig_ports };
+
+/// The status line, without its escape sequences.
+fn plainStatus(app: App, arena: Allocator) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const s = app.status().text;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == 0x1b) {
+            i = std.mem.findScalarPos(u8, s, i, 'm').?;
+            continue;
+        }
+        try out.append(arena, s[i]);
+    }
+    return out.items;
+}
+
+test "Save, then Load: the Profile becomes the current one, and loading makes the graph match it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ rig_phones, rig_phones, rig, rig, rig_phones }, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+
+    try app.say(false, "✓ earlier", .{});
+    _ = try app.key(arena, .{ .char = '3' }, big, scanner, wiring);
+    try testing.expect(!app.live());
+    var rows = try app.rows(arena, big);
+    // The home screen, with no menu, and the question on the status line.
+    try testing.expect(std.mem.find(u8, rows[2], "FROM") != null);
+    try testing.expectEqualStrings("", rows[big.rows - 2]);
+    try testing.expectEqualStrings("Save profile as (Esc to cancel): " ++ screen.style.reverse ++ " " ++ screen.style.off, rows[big.rows - 1]);
+
+    try typeKeys(&app, arena, "phones", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("✓ Saved profile 'phones'", app.home().status.text);
+    try testing.expectEqualStrings("phones", app.home().profile);
+    try testing.expect(!app.home().modified);
+    // Re-read just before saving.
+    try testing.expectEqual(2, n);
+    try testing.expectEqualStrings(
+        \\# aroute profile "phones", saved 2026-11-01 16:45:00
+        \\# device audio pw:synth=Synth
+        \\# device audio pw:phones=Headphones
+        \\# FROM|TO
+        \\pw:synth:out_FL|pw:phones:in_FL
+        \\pw:synth:out_FR|pw:phones:in_FR
+        \\
+    , try tmp.dir.readFileAlloc(testing.io, "phones.conf", arena, .unlimited));
+
+    // Someone wires Synth to Speakers instead.
+    try app.refresh(scanner);
+    try testing.expect(app.home().modified);
+
+    _ = try app.key(arena, .{ .char = '4' }, big, scanner, wiring);
+    rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[2], "PROFILES") != null);
+    try testing.expect(std.mem.find(u8, rows[2], app.store.dir) != null);
+    try testing.expect(std.mem.startsWith(u8, rows[3], screen.style.bold ++ screen.style.cyan ++ "a" ++ screen.style.off ++ " phones  "));
+    try testing.expect(std.mem.find(u8, rows[3], "(2 links)") != null);
+    try testing.expect(std.mem.find(u8, rows[big.rows - 2], "Load profile: pick one") != null);
+    // Not a letter on screen.
+    _ = try app.key(arena, .{ .char = 'b' }, big, scanner, wiring);
+    try testing.expectEqual(.load, app.mode.choose.action);
+
+    _ = try app.key(arena, .{ .char = 'a' }, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualDeep(&[_]graph.Ends{ .{ .pw = .{ 2, 4 } }, .{ .pw = .{ 3, 5 } } }, undone.items);
+    try testing.expectEqualDeep(&[_]graph.Ends{ .{ .pw = .{ 2, 6 } }, .{ .pw = .{ 3, 7 } } }, made.items);
+    try testing.expectEqualStrings("✓ Loaded 'phones': 2 added, 2 removed", app.home().status.text);
+    try testing.expect(!app.home().status.err);
+    try testing.expectEqualStrings("phones", app.home().profile);
+    // Re-read before loading, and after, to show it.
+    try testing.expectEqual(5, n);
+    try testing.expect(!app.home().modified);
+}
+
+test "Save: the current Profile's name to start with; saving under it again asks nothing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ rig, rig, rig_phones }, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+
+    // Spaces around the name are dropped; characters a name can't have don't go in.
+    try typeKeys(&app, arena, "3  li/ve:|  ", big, scanner, wiring);
+    try testing.expectEqualStrings("  live  ", app.mode.save.name.text());
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("✓ Saved profile 'live'", app.home().status.text);
+
+    try app.refresh(scanner);
+    try testing.expect(app.home().modified);
+    _ = try app.key(arena, .{ .char = '3' }, big, scanner, wiring);
+    try testing.expectEqualStrings("live", app.mode.save.name.text());
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("✓ Saved profile 'live'", app.home().status.text);
+    try testing.expect(!app.home().modified);
+    try testing.expectEqual(2, profile.links(try tmp.dir.readFileAlloc(testing.io, "live.conf", arena, .unlimited)));
+}
+
+test "Save: overwriting another Profile asks first; Esc, an empty name or only spaces save nothing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "gig.conf", .data = "# old\n" });
+
+    try typeKeys(&app, arena, "3gig", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqual(.save, std.meta.activeTag(app.mode));
+    const rows = try app.rows(arena, big);
+    try testing.expectEqualStrings("Profile 'gig' exists. Overwrite? (y/n) " ++ screen.style.reverse ++ " " ++ screen.style.off, rows[big.rows - 1]);
+    // An answer needs Enter, and something typed.
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try typeKeys(&app, arena, "no", big, scanner, wiring);
+    try testing.expectEqual(.save, std.meta.activeTag(app.mode));
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("Not saved.", app.home().status.text);
+    try testing.expectEqualStrings("default", app.home().profile);
+
+    try typeKeys(&app, arena, "3gig", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("", app.home().status.text);
+    try testing.expectEqualStrings("# old\n", try tmp.dir.readFileAlloc(testing.io, "gig.conf", arena, .unlimited));
+
+    try typeKeys(&app, arena, "3gig", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try typeKeys(&app, arena, "Y", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("✓ Saved profile 'gig'", app.home().status.text);
+    try testing.expectEqualStrings("gig", app.home().profile);
+    try testing.expect(std.mem.startsWith(u8, try tmp.dir.readFileAlloc(testing.io, "gig.conf", arena, .unlimited), "# aroute profile \"gig\""));
+
+    // Esc while typing the name; Enter on an empty name does nothing; only spaces saves nothing.
+    try app.say(false, "✓ earlier", .{});
+    try typeKeys(&app, arena, "3x", big, scanner, wiring);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("", app.home().status.text);
+    _ = try app.key(arena, .{ .char = '3' }, big, scanner, wiring);
+    for (0..3) |_| _ = try app.key(arena, .backspace, big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqual(.save, std.meta.activeTag(app.mode));
+    try typeKeys(&app, arena, "   ", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("", app.home().status.text);
+    try testing.expectEqualStrings("gig", app.home().profile);
+}
+
+test "Save: a Profile that can't be written, or a graph that can't be re-read" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ rig, rig_phones, null }, .next = &n };
+    // The profiles "directory" is a file.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "" });
+    var store = try tmpStore(arena, tmp);
+    store.dir = try std.fs.path.join(arena, &.{ store.dir, "file" });
+    var app: App = try .init(testing.allocator, scanner, store);
+    defer app.deinit();
+
+    try typeKeys(&app, arena, "3live", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "✗ could not write {s}/live.conf", .{store.dir}), app.home().status.text);
+    try testing.expect(app.home().status.err);
+    try testing.expectEqualStrings("default", app.home().profile);
+    // What was re-read is shown, and it is not what the Profile was loaded with.
+    try testing.expect(app.home().modified);
+
+    try typeKeys(&app, arena, "3live", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings(unreadable, app.home().status.text);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("default", app.home().profile);
+}
+
+/// A Profile with an audio Device and a MIDI one that are not there, and
+/// one of its two other Links that is.
+const gig =
+    \\# aroute profile "gig", saved 2026-11-01 16:45:00
+    \\# device audio pw:synth=Synth
+    \\# device audio pw:interface=Big Interface
+    \\# device midi alsa:Pads=Pads
+    \\# FROM|TO
+    \\pw:synth:out_FL|pw:interface:in_1
+    \\alsa:Pads:Pads MIDI 1|alsa:Gone:in
+    \\pw:synth:out_FR|pw:speakers:in_FR
+    \\
+;
+
+test "Load: with audio Devices missing, asks first; y loads what it can" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "gig.conf", .data = gig });
+
+    for ("4a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqual(.confirm, std.meta.activeTag(app.mode));
+    try testing.expect(!app.live());
+    try testing.expectEqual(2, n);
+    var rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[2], "LOAD PROFILE 'gig'") != null);
+    try testing.expect(std.mem.find(u8, rows[5], "Big Interface") != null);
+    try testing.expect(std.mem.find(u8, rows[7], "MIDI devices from the profile that are not present:") != null);
+    try testing.expect(std.mem.find(u8, rows[8], "Pads") != null);
+    try testing.expect(std.mem.find(u8, rows[9], "Gone") != null);
+    try testing.expect(std.mem.find(u8, rows[12], "(1 of them).") != null);
+    try testing.expect(std.mem.startsWith(u8, rows[big.rows - 2], "Load 'gig' anyway?"));
+    // Nothing is changed yet, and other keys do nothing.
+    for ([_]term.Key{ .{ .char = 'x' }, .enter, .tab }) |k| _ = try app.key(arena, k, big, scanner, wiring);
+    try testing.expectEqual(.confirm, std.meta.activeTag(app.mode));
+    try testing.expectEqual(0, made.items.len + undone.items.len);
+
+    // Planned again against a fresh read.
+    _ = try app.key(arena, .{ .char = 'y' }, big, scanner, wiring);
+    try testing.expectEqual(4, n);
+    try testing.expect(app.live());
+    try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 2, 4 } }}, undone.items);
+    try testing.expectEqual(0, made.items.len);
+    try testing.expectEqualStrings("✓ Loaded 'gig': 0 added, 1 removed · skipped (not present): Big Interface, Pads, Gone", app.home().status.text);
+    try testing.expectEqualStrings("gig", app.home().profile);
+    try testing.expect(!app.home().modified);
+
+    // n, N and Esc don't load it.
+    for ([_]term.Key{ .{ .char = 'n' }, .{ .char = 'N' }, .esc }) |k| {
+        for ("4a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+        try testing.expectEqual(.confirm, std.meta.activeTag(app.mode));
+        _ = try app.key(arena, k, big, scanner, wiring);
+        try testing.expect(app.live());
+        try testing.expectEqualStrings("Not loaded.", app.home().status.text);
+    }
+    try testing.expectEqual(1, undone.items.len);
+
+    // A screen too short for it scrolls.
+    for ("4a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    const small: screen.Size = .{ .rows = 10, .cols = 80 };
+    _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try testing.expectEqual(4, app.mode.confirm.scroll);
+    rows = try app.rows(arena, small);
+    try testing.expect(std.mem.find(u8, rows[2], "↑ 4 more (PgUp)") != null);
+    _ = try app.key(arena, .page_up, small, scanner, wiring);
+    try testing.expectEqual(0, app.mode.confirm.scroll);
+    _ = try app.key(arena, .{ .char = 'Y' }, small, scanner, wiring);
+    try testing.expectEqualStrings("gig", app.home().profile);
+}
+
+test "Load: failed Links are counted, in red; MIDI Devices alone don't ask" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone, .fail = &.{ .{ .pw = .{ 2, 6 } }, .{ .pw = .{ 3, 5 } } } };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "phones.conf", .data =
+        \\# device midi alsa:Pads=Pads
+        \\pw:synth:out_FL|pw:phones:in_FL
+        \\pw:synth:out_FR|pw:phones:in_FR
+        \\alsa:Pads:Pads MIDI 1|alsa:Gone:in
+        \\
+    });
+
+    for ("4a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expect(app.live());
+    // Synth → Speakers' right channel could not be undone: not counted.
+    try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 2, 4 } }}, undone.items);
+    try testing.expectEqualDeep(&[_]graph.Ends{.{ .pw = .{ 3, 7 } }}, made.items);
+    try testing.expectEqualStrings("✓ Loaded 'phones': 1 added, 1 removed, 1 failed · skipped (not present): Pads, Gone", try plainStatus(app, arena));
+    try testing.expect(std.mem.find(u8, app.status().text, screen.style.red ++ "1 failed" ++ screen.style.off) != null);
+    try testing.expect(!app.status().err);
+}
+
+test "Load: a Profile that can't be read, a graph that can't be re-read, none at all" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{ rig, rig, null }, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+
+    _ = try app.key(arena, .{ .char = '4' }, big, scanner, wiring);
+    var rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[3], "(no saved profiles yet — use 3 Save profile)") != null);
+    for ([_]term.Key{ .{ .char = 'a' }, .page_down, .enter }) |k| _ = try app.key(arena, k, big, scanner, wiring);
+    try testing.expectEqual(.load, app.mode.choose.action);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expect(app.live());
+
+    // A directory, not a file.
+    try tmp.dir.createDirPath(testing.io, "odd.conf");
+    for ("4a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings("✗ cannot read profile 'odd'", app.home().status.text);
+    try testing.expect(app.home().status.err);
+    try testing.expect(app.live());
+
+    for ("4a") |c| _ = try app.key(arena, .{ .char = c }, big, scanner, wiring);
+    try testing.expectEqualStrings(unreadable, app.home().status.text);
+    try testing.expect(app.live());
+    rows = try app.rows(arena, big);
+    try testing.expectEqualStrings("default", app.home().profile);
+    try testing.expectEqual(0, made.items.len);
+}
+
+test "Delete: asks y/n, stays on the list; the current Profile goes back to default" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    for ([_][]const u8{ "a.conf", "b.conf", "c.conf" }) |f| try tmp.dir.writeFile(testing.io, .{ .sub_path = f, .data = "x|y\n" });
+    try app.setProfile("c");
+
+    try app.say(false, "✓ earlier", .{});
+    _ = try app.key(arena, .{ .char = '5' }, big, scanner, wiring);
+    try testing.expectEqualStrings("", app.status().text);
+    var rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[big.rows - 2], "Delete profile: pick one") != null);
+
+    _ = try app.key(arena, .{ .char = 'b' }, big, scanner, wiring);
+    rows = try app.rows(arena, big);
+    try testing.expectEqualStrings("Delete profile 'b'? (y/n) " ++ screen.style.reverse ++ " " ++ screen.style.off, rows[big.rows - 1]);
+    // Letters go to the answer, not to picking.
+    try typeKeys(&app, arena, "a", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("Not deleted.", app.status().text);
+    try testing.expectEqual(3, app.mode.choose.entries.len);
+
+    try typeKeys(&app, arena, "by", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("✓ Deleted profile 'b'", app.status().text);
+    try testing.expectEqual(.delete, app.mode.choose.action);
+    try testing.expectEqualDeep(&[_]profile.Store.Entry{ .{ .name = "a", .links = 1 }, .{ .name = "c", .links = 1 } }, app.mode.choose.entries);
+    try testing.expectEqualStrings("c", app.home().profile);
+
+    // Esc on the question asks nothing more.
+    try typeKeys(&app, arena, "by", big, scanner, wiring);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expectEqual(null, app.mode.choose.asking);
+    try testing.expectEqualStrings("", app.status().text);
+
+    try typeKeys(&app, arena, "byes", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("✓ Deleted profile 'c'", app.status().text);
+    try testing.expectEqualStrings("default", app.home().profile);
+    try testing.expect(!app.home().modified);
+
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("", app.status().text);
+    try testing.expect(!try app.store.exists(arena, "b"));
+    try testing.expect(try app.store.exists(arena, "a"));
+}
+
+test "Delete: one that can't be deleted" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    const store = try tmpStore(arena, tmp);
+    var app: App = try .init(testing.allocator, scanner, store);
+    defer app.deinit();
+    try tmp.dir.createDirPath(testing.io, "odd.conf");
+
+    try typeKeys(&app, arena, "5ay", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "✗ could not delete {s}/odd.conf", .{store.dir}), app.status().text);
+    try testing.expect(app.status().err);
+    try testing.expectEqual(1, app.mode.choose.entries.len);
+}
+
+test "Load and Delete search: by name; Enter on the only match picks it; an answer clears it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    for ([_][]const u8{ "Live set.conf", "Live gig.conf", "Mixing.conf" }) |f| try tmp.dir.writeFile(testing.io, .{ .sub_path = f, .data = "" });
+
+    try typeKeys(&app, arena, "4/LIVE", big, scanner, wiring);
+    // Keys that aren't characters do nothing.
+    _ = try app.key(arena, .other, big, scanner, wiring);
+    try testing.expectEqualStrings("LIVE", app.mode.choose.search.query());
+    var rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[3], "Live gig") != null);
+    try testing.expect(std.mem.find(u8, rows[4], "Live set") != null);
+    try testing.expectEqualStrings("", rows[5]);
+    try testing.expectEqualStrings("/LIVE" ++ screen.style.reverse ++ " " ++ screen.style.off, rows[big.rows - 1]);
+    try typeKeys(&app, arena, "zz", big, scanner, wiring);
+    rows = try app.rows(arena, big);
+    try testing.expect(std.mem.find(u8, rows[3], "(no matches)") != null);
+    _ = try app.key(arena, .backspace, big, scanner, wiring);
+    _ = try app.key(arena, .backspace, big, scanner, wiring);
+    try typeKeys(&app, arena, " set", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expect(app.live());
+    try testing.expectEqualStrings("✓ Loaded 'Live set': 0 added, 2 removed", app.home().status.text);
+
+    // Several match: Enter keeps the filter, and letters pick in it.
+    try typeKeys(&app, arena, "5/live", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqual(.filtered, app.mode.choose.search.state);
+    try testing.expect(std.mem.find(u8, (try app.rows(arena, big))[big.rows - 2], " Clear search") != null);
+    try typeKeys(&app, arena, "by", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("✓ Deleted profile 'Live set'", app.status().text);
+    try testing.expectEqualDeep(App.Choosing{ .action = .delete, .entries = app.mode.choose.entries }, app.mode.choose);
+    try testing.expectEqualStrings("default", app.home().profile);
+
+    // Enter on the only match asks about it.
+    try typeKeys(&app, arena, "/mix", big, scanner, wiring);
+    _ = try app.key(arena, .enter, big, scanner, wiring);
+    try testing.expectEqualStrings("Mixing", app.mode.choose.asking.?.name.text());
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    // Esc clears the filter, then goes back.
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expectEqual(.off, app.mode.choose.search.state);
+    _ = try app.key(arena, .esc, big, scanner, wiring);
+    try testing.expect(app.live());
+}
+
+test "Load and Delete: PgUp/PgDn page the Profiles, letters from `a` on each page" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    // p10 … p69: 60 Profiles, 15 pages of 4.
+    for (10..70) |i| try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.fmt.allocPrint(arena, "p{d}.conf", .{i}), .data = "" });
+
+    const small: screen.Size = .{ .rows = 10, .cols = 60 };
+    try testing.expectEqual(4, screen.profileRows(small));
+    _ = try app.key(arena, .{ .char = '5' }, small, scanner, wiring);
+    _ = try app.key(arena, .page_up, small, scanner, wiring);
+    try testing.expectEqual(0, app.mode.choose.page);
+    for (0..3) |_| _ = try app.key(arena, .page_down, small, scanner, wiring);
+    _ = try app.key(arena, .page_up, small, scanner, wiring);
+    try testing.expectEqual(2, app.mode.choose.page);
+    try testing.expect(std.mem.find(u8, (try app.rows(arena, small))[2], "PROFILES  3/15") != null);
+    // Only 4 letters on screen.
+    _ = try app.key(arena, .{ .char = 'e' }, small, scanner, wiring);
+    try testing.expectEqual(null, app.mode.choose.asking);
+    _ = try app.key(arena, .{ .char = 'b' }, small, scanner, wiring);
+    try testing.expectEqualStrings("p19", app.mode.choose.asking.?.name.text());
+    try typeKeys(&app, arena, "y", small, scanner, wiring);
+    _ = try app.key(arena, .enter, small, scanner, wiring);
+    // Still on the page it was on.
+    try testing.expectEqual(2, app.mode.choose.page);
+    try testing.expectEqual(59, app.mode.choose.entries.len);
+
+    // Search goes back to page 1, and so does an answer with a filter on.
+    for (0..20) |_| _ = try app.key(arena, .page_down, small, scanner, wiring);
+    try testing.expectEqual(14, app.mode.choose.page);
+    try typeKeys(&app, arena, "/6", small, scanner, wiring);
+    try testing.expectEqual(0, app.mode.choose.page);
+    _ = try app.key(arena, .page_down, small, scanner, wiring);
+    _ = try app.key(arena, .enter, small, scanner, wiring);
+    try typeKeys(&app, arena, "an", small, scanner, wiring);
+    _ = try app.key(arena, .enter, small, scanner, wiring);
+    try testing.expectEqual(0, app.mode.choose.page);
+}
+
+fn saveLoadDelete(gpa: Allocator, store: profile.Store) !void {
+    // The frame arena runs out of memory too.
+    var arena_state: EveryAlloc = .{ .gpa = gpa };
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    var undone: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made, .undone = &undone };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(gpa, scanner, store);
+    defer app.deinit();
+    // Asked to load `gig`, then to delete `a long profile name` and `gig`.
+    for ([_][]const u8{ "3a long profile name", "\n", "4b", "y", "4b", "N", "5a", "y\n", "5ay\n" }) |keys| {
+        for (keys) |c| _ = try app.key(arena, if (c == '\n') .enter else .{ .char = c }, big, scanner, wiring);
+        // An allocating writer that runs out of memory says `WriteFailed`.
+        _ = app.rows(arena, big) catch |err| return switch (err) {
+            error.WriteFailed => error.OutOfMemory,
+            error.OutOfMemory => |e| e,
+        };
+    }
+}
+
+test "Profiles: running out of memory leaks nothing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const store = try tmpStore(arena, tmp);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "gig.conf", .data = gig });
+    // Every run starts with only `gig`, even one that stopped half way.
+    const Run = struct {
+        fn run(gpa: Allocator, s: profile.Store, dir: Io.Dir) !void {
+            defer {
+                dir.deleteFile(testing.io, "a long profile name.conf") catch {};
+                dir.writeFile(testing.io, .{ .sub_path = "gig.conf", .data = gig }) catch {};
+            }
+            return saveLoadDelete(gpa, s);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Run.run, .{ store, tmp.dir });
+}
+
+test "App.rows: the Profile screens" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var made: std.ArrayList(graph.Ends) = .empty;
+    const wiring: FakeWiring = .{ .made = &made };
+    var n: usize = 0;
+    const scanner: FakeScanner = .{ .graphs = &.{rig}, .next = &n };
+    var app: App = try .init(testing.allocator, scanner, try tmpStore(arena, tmp));
+    defer app.deinit();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "gig.conf", .data = gig });
+
+    for ([_][]const u8{ "3", "4", "5", "4a" }, [_][]const u8{ "FROM", "PROFILES", "PROFILES", "LOAD PROFILE" }, [_][]const u8{ "", "Load profile", "Delete profile", "Load 'gig' anyway?" }) |keys, body, menu| {
+        app.mode = .home;
+        try typeKeys(&app, arena, keys, big, scanner, wiring);
+        const rows = try app.rows(arena, big);
+        try testing.expectEqual(big.rows, rows.len);
+        try testing.expect(std.mem.find(u8, rows[2], body) != null);
+        try testing.expect(std.mem.startsWith(u8, rows[big.rows - 2], menu));
+    }
 }

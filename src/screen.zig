@@ -19,6 +19,7 @@ const Writer = std.Io.Writer;
 const graph = @import("graph.zig");
 const picker = @import("picker.zig");
 const Search = @import("search.zig").Search;
+const Entry = @import("profile.zig").Store.Entry;
 const text = @import("text.zig");
 
 pub const style = struct {
@@ -76,6 +77,8 @@ pub const Home = struct {
     status: Status = .{},
     /// Index of the first body line shown; `view` keeps it in range.
     scroll: usize = 0,
+    /// Save's question, in place of the menu and the status line.
+    prompt: ?Prompt = null,
 };
 
 /// The home screen, one string per row.
@@ -84,9 +87,22 @@ pub fn home(arena: Allocator, h: Home, size: Size) Error![]const []const u8 {
         .title = try title(arena, h.profile, h.modified, size.cols),
         .body = try homeBody(arena, h.graph, size.cols),
         .scroll = h.scroll,
-        .menu = home_menu,
-        .status = h.status,
+        // As in the script, no menu while saving.
+        .menu = if (h.prompt == null) home_menu else "",
+        .status = if (h.prompt) |p| try promptStatus(arena, p) else h.status,
     }, size);
+}
+
+/// A question asked on the status line, and what has been typed in answer.
+pub const Prompt = struct {
+    question: []const u8,
+    typed: []const u8,
+};
+
+const cursor = style.reverse ++ " " ++ style.off;
+
+fn promptStatus(arena: Allocator, p: Prompt) Error!Status {
+    return .{ .text = try std.fmt.allocPrint(arena, "{s}{s}" ++ cursor, .{ p.question, p.typed }) };
 }
 
 const home_menu = style.bold ++ "Esc" ++ style.off ++ " Exit   " ++
@@ -373,8 +389,7 @@ const search_key = style.bold ++ "/" ++ style.off ++ " Search   ";
 /// The status line while searching: the field, with a cursor while typing.
 fn searchStatus(arena: Allocator, s: Search, status: Status) Error!Status {
     if (s.state == .off) return status;
-    const cursor = if (s.state == .typing) style.reverse ++ " " ++ style.off else "";
-    return .{ .text = try std.fmt.allocPrint(arena, "/{s}{s}", .{ s.query(), cursor }) };
+    return .{ .text = try std.fmt.allocPrint(arena, "/{s}{s}", .{ s.query(), if (s.state == .typing) cursor else "" }) };
 }
 
 fn connectMenu(arena: Allocator, c: Connect, paged: bool) Error![]const u8 {
@@ -443,6 +458,119 @@ pub fn disconnect(arena: Allocator, d: Disconnect, size: Size) Error![]const []c
         else
             try std.mem.concat(arena, u8, &.{ "Disconnect: pick a connection   " ++ search_key, if (paged) page_keys else "", escKey(d.search) }),
         .status = try searchStatus(arena, d.search, d.status),
+    }, size);
+}
+
+/// Picking a Profile to load or delete, as the script's `draw_profiles`.
+pub const Profiles = struct {
+    profile: []const u8,
+    modified: bool,
+    status: Status = .{},
+    action: Action,
+    /// The profiles directory, shown in the header.
+    dir: []const u8,
+    /// The Profiles listed: narrowed by `search`, if any.
+    shown: []const Entry,
+    /// Whether there are any Profiles, listed or not.
+    any: bool,
+    /// The list's page.
+    page: usize = 0,
+    search: Search = .{},
+    /// Delete's `(y/n)` question, in place of the status line while it is asked.
+    prompt: ?Prompt = null,
+
+    pub const Action = enum { load, delete };
+};
+
+/// Rows the Profiles get on the Load and Delete screens: the body less the header.
+pub fn profileRows(size: Size) usize {
+    return bodyRows(size) -| 1;
+}
+
+/// The Load or Delete screen, one string per row.
+pub fn profiles(arena: Allocator, p: Profiles, size: Size) Error![]const []const u8 {
+    const pages: picker.Pages = .init(p.shown.len, profileRows(size));
+    const paged = pages.count() > 1;
+    var lines: std.ArrayList([]const u8) = .empty;
+    const name = if (paged)
+        try std.fmt.allocPrint(arena, "  PROFILES  {d}/{d}", .{ pages.clamp(p.page) + 1, pages.count() })
+    else
+        "  PROFILES";
+    try lines.append(arena, try std.fmt.allocPrint(arena, style.bold ++ "{s}" ++ style.off ++ "  " ++ style.dim ++ "{s}" ++ style.off, .{ name, p.dir }));
+    if (!p.any) {
+        try lines.append(arena, dimLine("(no saved profiles yet — use 3 Save profile)"));
+    } else if (p.shown.len == 0) {
+        try lines.append(arena, dimLine("(no matches)"));
+    }
+    const shown = pages.slice(p.page);
+    for (p.shown[shown.start..][0..shown.len], 0..) |e, i| {
+        try lines.append(arena, try std.fmt.allocPrint(arena, style.bold ++ style.cyan ++ "{c}" ++ style.off ++ " {s}  " ++ style.dim ++ "({d} links)" ++ style.off, .{ picker.letter(i), e.name, e.links }));
+    }
+    const verb = switch (p.action) {
+        .load => "Load profile: pick one   ",
+        .delete => "Delete profile: pick one   ",
+    };
+    return frame(arena, .{
+        .title = try title(arena, p.profile, p.modified, size.cols),
+        .body = lines.items,
+        .scroll = 0,
+        .menu = if (p.search.state == .typing)
+            typingMenu(paged)
+        else
+            try std.mem.concat(arena, u8, &.{ verb, search_key, if (paged) page_keys else "", escKey(p.search) }),
+        .status = if (p.prompt) |q| try promptStatus(arena, q) else try searchStatus(arena, p.search, p.status),
+    }, size);
+}
+
+/// Asking whether to load a Profile some of whose audio Devices are not
+/// there, as the script's `draw_missing`.
+pub const Missing = struct {
+    profile: []const u8,
+    modified: bool,
+    status: Status = .{},
+    /// The Profile to load.
+    name: []const u8,
+    /// Display names of the Devices that are not there.
+    audio: []const []const u8,
+    midi: []const []const u8,
+    /// How many of its Links can be made.
+    available: usize,
+    /// Index of the first body line shown; `view` keeps it in range.
+    scroll: usize = 0,
+};
+
+/// The confirmation's body: what is missing, and what loading would do.
+pub fn missingBody(arena: Allocator, m: Missing) Error![]const []const u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    try lines.appendSlice(arena, &.{
+        try std.fmt.allocPrint(arena, style.bold ++ "  LOAD PROFILE '{s}'" ++ style.off, .{m.name}),
+        "",
+        "  " ++ style.red ++ "These audio devices from the profile are not present:" ++ style.off,
+    });
+    for (m.audio) |d| try lines.append(arena, try std.fmt.allocPrint(arena, "    " ++ style.audio ++ "●" ++ style.off ++ " {s}", .{d}));
+    if (m.midi.len > 0) {
+        try lines.appendSlice(arena, &.{ "", "  MIDI devices from the profile that are not present:" });
+        for (m.midi) |d| try lines.append(arena, try std.fmt.allocPrint(arena, "    " ++ style.midi ++ "●" ++ style.off ++ " {s}", .{d}));
+    }
+    try lines.appendSlice(arena, &.{
+        "",
+        dimLine("Continuing replaces all current connections and hooks up only the"),
+        try std.fmt.allocPrint(arena, "  " ++ style.dim ++ "profile connections whose devices are present ({d} of them)." ++ style.off, .{m.available}),
+    });
+    return lines.items;
+}
+
+/// The confirmation screen, one string per row. When it doesn't fit,
+/// `PgUp`/`PgDn` scroll it, as the home screen.
+pub fn missing(arena: Allocator, m: Missing, size: Size) Error![]const []const u8 {
+    return frame(arena, .{
+        .title = try title(arena, m.profile, m.modified, size.cols),
+        .body = try missingBody(arena, m),
+        .scroll = m.scroll,
+        .menu = try std.fmt.allocPrint(arena, "Load '{s}' anyway?   " ++
+            style.bold ++ "y" ++ style.off ++ " Continue with the available connections   " ++
+            style.bold ++ "n" ++ style.off ++ "/" ++ style.bold ++ "Esc" ++ style.off ++ " Abort", .{m.name}),
+        .status = m.status,
     }, size);
 }
 
@@ -1114,4 +1242,156 @@ test "disconnect: searching shows the field, (no matches) when nothing is left" 
     p = try plainRows(arena, rows);
     try testing.expectEqualStrings("  CONNECTIONS  1/2", p[2]);
     try testing.expectEqualStrings("Search: type to narrow   PgUp/PgDn Page   Enter Done   Esc Cancel", p[6]);
+}
+
+test "home: Save's question in place of the menu and the status line" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rows = try home(arena, .{
+        .graph = fixture,
+        .profile = "default",
+        .modified = false,
+        .status = .{ .text = "✓ earlier" },
+        .prompt = .{ .question = "Save profile as (Esc to cancel): ", .typed = "Live" },
+    }, .{ .rows = 16, .cols = 50 });
+    try testing.expectEqualStrings("", rows[14]);
+    try testing.expectEqualStrings("Save profile as (Esc to cancel): Live" ++ style.reverse ++ " " ++ style.off, rows[15]);
+}
+
+const entries = [_]Entry{ .{ .name = "Live set", .links = 12 }, .{ .name = "Mixing", .links = 0 }, .{ .name = "Normal idle", .links = 1 } };
+
+test "profiles: the Profiles with letters and how many Links each has" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const p: Profiles = .{ .profile = "Mixing", .modified = true, .status = .{ .text = "✓ Deleted profile 'x'" }, .action = .delete, .dir = "/home/u/.config/aroute/profiles", .shown = &entries, .any = true };
+    const rows = try profiles(arena, p, .{ .rows = 10, .cols = 60 });
+    try expectRows(&.{
+        "aroute  profile: Mixing (modified)   ● audio  ● MIDI",
+        try dashes(arena, 60),
+        "  PROFILES  /home/u/.config/aroute/profiles",
+        "a Live set  (12 links)",
+        "b Mixing  (0 links)",
+        "c Normal idle  (1 links)",
+        "",
+        try dashes(arena, 60),
+        "Delete profile: pick one   / Search   Esc Back",
+        "✓ Deleted profile 'x'",
+    }, try plainRows(arena, rows));
+    try testing.expect(std.mem.startsWith(u8, rows[2], style.bold ++ "  PROFILES" ++ style.off ++ "  " ++ style.dim));
+    try testing.expectEqualStrings(style.bold ++ style.cyan ++ "a" ++ style.off ++ " Live set  " ++ style.dim ++ "(12 links)" ++ style.off, rows[3]);
+
+    var load = p;
+    load.action = .load;
+    try testing.expectEqualStrings("Load profile: pick one   / Search   Esc Back", (try plainRows(arena, try profiles(arena, load, .{ .rows = 10, .cols = 60 })))[8]);
+}
+
+test "profiles: none yet, none matching, more than a page, a question" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const size: Size = .{ .rows = 8, .cols = 70 };
+    try testing.expectEqual(2, profileRows(size));
+
+    var p: Profiles = .{ .profile = "default", .modified = false, .action = .load, .dir = "/p", .shown = &.{}, .any = false };
+    var rows = try plainRows(arena, try profiles(arena, p, size));
+    try expectRows(&.{ "  PROFILES  /p", "  (no saved profiles yet — use 3 Save profile)", "" }, rows[2..5]);
+
+    p.any = true;
+    p.search = searchFor(.filtered, "zz");
+    rows = try plainRows(arena, try profiles(arena, p, size));
+    try expectRows(&.{ "  PROFILES  /p", "  (no matches)", "" }, rows[2..5]);
+    try testing.expectEqualStrings("Load profile: pick one   / Search   Esc Clear search", rows[6]);
+    try testing.expectEqualStrings("/zz", rows[7]);
+
+    p.shown = &entries;
+    p.page = 1;
+    p.search = .{};
+    rows = try plainRows(arena, try profiles(arena, p, size));
+    try expectRows(&.{ "  PROFILES  2/2  /p", "a Normal idle  (1 links)", "" }, rows[2..5]);
+    try testing.expectEqualStrings("Load profile: pick one   / Search   PgUp/PgDn Page   Esc Back", rows[6]);
+
+    p.search = searchFor(.typing, "");
+    rows = try plainRows(arena, try profiles(arena, p, size));
+    try testing.expectEqualStrings("Search: type to narrow   PgUp/PgDn Page   Enter Done   Esc Cancel", rows[6]);
+
+    // Delete's question goes where the status line is.
+    p = .{ .profile = "default", .modified = false, .action = .delete, .dir = "/p", .shown = &entries, .any = true, .status = .{ .text = "✓ earlier" }, .prompt = .{ .question = "Delete profile 'Mixing'? (y/n) ", .typed = "y" } };
+    const raw = try profiles(arena, p, size);
+    try testing.expectEqualStrings("Delete profile 'Mixing'? (y/n) y" ++ style.reverse ++ " " ++ style.off, raw[7]);
+}
+
+test "profiles: a tiny terminal shows what fits" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    for ([_]Size{
+        .{ .rows = 0, .cols = 0 },  .{ .rows = 1, .cols = 1 }, .{ .rows = 3, .cols = 5 },  .{ .rows = 6, .cols = 2 },
+        .{ .rows = 7, .cols = 12 }, .{ .rows = 8, .cols = 3 }, .{ .rows = 9, .cols = 20 }, .{ .rows = 10, .cols = 4 },
+    }) |size| {
+        for ([_]usize{ 0, 1, 5 }) |page| {
+            const rows = try profiles(arena, .{ .profile = "default", .modified = true, .action = .delete, .dir = "/home/u/.config/aroute/profiles", .shown = &entries, .any = true, .page = page }, size);
+            try testing.expectEqual(size.rows, rows.len);
+            for (rows) |r| try testing.expect(text.width(r) <= size.cols);
+        }
+    }
+}
+
+test "missing: the audio and MIDI Devices that are not there, and what loading would do" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const m: Missing = .{ .profile = "default", .modified = false, .name = "Gig", .audio = &.{ "MiniFuse 1", "USB Video (port capture_RL)" }, .midi = &.{"WORLDE"}, .available = 7 };
+    const rows = try missing(arena, m, .{ .rows = 18, .cols = 100 });
+    try expectRows(&.{
+        "aroute  profile: default   ● audio  ● MIDI",
+        try dashes(arena, 100),
+        "  LOAD PROFILE 'Gig'",
+        "",
+        "  These audio devices from the profile are not present:",
+        "    ● MiniFuse 1",
+        "    ● USB Video (port capture_RL)",
+        "",
+        "  MIDI devices from the profile that are not present:",
+        "    ● WORLDE",
+        "",
+        "  Continuing replaces all current connections and hooks up only the",
+        "  profile connections whose devices are present (7 of them).",
+        "",
+        "",
+        try dashes(arena, 100),
+        "Load 'Gig' anyway?   y Continue with the available connections   n/Esc Abort",
+        "",
+    }, try plainRows(arena, rows));
+    try testing.expectEqualStrings("  " ++ style.red ++ "These audio devices from the profile are not present:" ++ style.off, rows[4]);
+    try testing.expectEqualStrings("    " ++ style.audio ++ "●" ++ style.off ++ " MiniFuse 1", rows[5]);
+    try testing.expectEqualStrings("    " ++ style.midi ++ "●" ++ style.off ++ " WORLDE", rows[9]);
+    try testing.expect(std.mem.startsWith(u8, rows[12], "  " ++ style.dim));
+
+    // Without missing MIDI Devices there is no MIDI part.
+    var audio_only = m;
+    audio_only.midi = &.{};
+    const p = try plainRows(arena, try missing(arena, audio_only, .{ .rows = 18, .cols = 100 }));
+    try expectRows(&.{ "    ● USB Video (port capture_RL)", "", "  Continuing replaces all current connections and hooks up only the" }, p[6..9]);
+}
+
+test "missing: scrolled, and a tiny terminal shows what fits" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const m: Missing = .{ .profile = "default", .modified = false, .name = "Gig", .audio = &.{ "A", "B", "C" }, .midi = &.{}, .available = 0, .scroll = 5 };
+    const p = try plainRows(arena, try missing(arena, m, .{ .rows = 10, .cols = 80 }));
+    try expectRows(&.{ "  ↑ 5 more (PgUp)", "    ● C", "", "  Continuing replaces all current connections and hooks up only the", "  profile connections whose devices are present (0 of them)." }, p[2..7]);
+
+    for ([_]Size{ .{ .rows = 0, .cols = 0 }, .{ .rows = 1, .cols = 1 }, .{ .rows = 6, .cols = 2 }, .{ .rows = 9, .cols = 20 } }) |size| {
+        const rows = try missing(arena, m, size);
+        try testing.expectEqual(size.rows, rows.len);
+        for (rows) |r| try testing.expect(text.width(r) <= size.cols);
+    }
 }

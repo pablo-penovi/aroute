@@ -131,6 +131,104 @@ pub fn names(arena: Allocator, io: Io, dir: Io.Dir) (Io.Dir.Iterator.Error || Al
     return list.items;
 }
 
+/// The profiles directory, as `--profiles`, `--save`, `--load` and the TUI
+/// use it.
+pub const Store = struct {
+    io: Io,
+    /// Made on the first save.
+    dir: []const u8,
+    /// Applied to the `# device` labels.
+    aliases: Aliases = .none,
+    /// The local time a save is stamped with, `YYYY-MM-DD HH:MM:SS`.
+    clock: *const fn (arena: Allocator, io: Io) Allocator.Error![]const u8,
+
+    pub fn path(s: Store, arena: Allocator, name: []const u8) Allocator.Error![]const u8 {
+        return std.fmt.allocPrint(arena, "{s}/{s}.conf", .{ s.dir, name });
+    }
+
+    /// The Profiles' names, in the script's order. No directory, or an
+    /// unreadable one, means no Profiles.
+    pub fn list(s: Store, arena: Allocator) Allocator.Error![]const []const u8 {
+        var dir = Io.Dir.cwd().openDir(s.io, s.dir, .{ .iterate = true }) catch return &.{};
+        defer dir.close(s.io);
+        return names(arena, s.io, dir) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => &.{},
+        };
+    }
+
+    pub const Entry = struct {
+        name: []const u8,
+        /// See `links`; none if the file can't be read.
+        links: usize,
+    };
+
+    /// Every Profile, in the script's order, with how many Links it holds.
+    pub fn entries(s: Store, arena: Allocator) Allocator.Error![]const Entry {
+        const all = try s.list(arena);
+        const out = try arena.alloc(Entry, all.len);
+        for (all, out) |name, *e| {
+            const file = s.readFile(arena, name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Unreadable => "",
+            };
+            e.* = .{ .name = name, .links = links(file) };
+        }
+        return out;
+    }
+
+    /// The Profile `name`; its slices are in `arena`.
+    pub fn read(s: Store, arena: Allocator, name: []const u8) error{ Unreadable, OutOfMemory }!Profile {
+        return parse(arena, try s.readFile(arena, name));
+    }
+
+    fn readFile(s: Store, arena: Allocator, name: []const u8) error{ Unreadable, OutOfMemory }![]const u8 {
+        return Io.Dir.cwd().readFileAlloc(s.io, try s.path(arena, name), arena, .limited(1 << 24)) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Unreadable,
+        };
+    }
+
+    /// As the script's `-e`.
+    pub fn exists(s: Store, arena: Allocator, name: []const u8) Allocator.Error!bool {
+        Io.Dir.cwd().access(s.io, try s.path(arena, name), .{}) catch return false;
+        return true;
+    }
+
+    /// Writes every current Link of `g` as the Profile `name`, overwriting it.
+    pub fn save(s: Store, arena: Allocator, name: []const u8, g: graph.Graph) error{ Unwritable, OutOfMemory }!void {
+        var file: Writer.Allocating = .init(arena);
+        write(&file.writer, arena, name, try s.clock(arena, s.io), g, s.aliases) catch |err| switch (err) {
+            // An allocating writer fails only when out of memory.
+            error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
+        };
+        const p = try s.path(arena, name);
+        Io.Dir.cwd().createDirPath(s.io, s.dir) catch return error.Unwritable;
+        Io.Dir.cwd().writeFile(s.io, .{ .sub_path = p, .data = file.written() }) catch return error.Unwritable;
+    }
+
+    /// As the script's `rm -f`: one that is not there is as good as deleted.
+    pub fn delete(s: Store, arena: Allocator, name: []const u8) error{ Undeletable, OutOfMemory }!void {
+        Io.Dir.cwd().deleteFile(s.io, try s.path(arena, name)) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return error.Undeletable,
+        };
+    }
+};
+
+/// How many Links a Profile file holds, as the script counts them with
+/// `grep -cv '^#'`: every line not starting with `#`, blank ones too.
+pub fn links(source: []const u8) usize {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line| {
+        // The newline that ends the file starts no line.
+        if (line.len == 0 and it.index == null) break;
+        if (line.len == 0 or line[0] != '#') n += 1;
+    }
+    return n;
+}
+
 /// Close to how bash sorts a glob in an en_US.UTF-8 locale, for the
 /// characters a Profile file name may hold: by letters and digits alone,
 /// ignoring case (`a-b` next to `ab`); then lowercase before uppercase; then
@@ -356,4 +454,120 @@ test "names: *.conf files, in the script's order" {
     const got = try names(arena, testing.io, tmp.dir);
     try testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try testing.expectEqualStrings(w, g);
+}
+
+test "links: lines not starting with #, blank ones too, as grep -cv counts them" {
+    try testing.expectEqual(0, links(""));
+    try testing.expectEqual(0, links("# aroute profile \"x\"\n# FROM|TO\n"));
+    try testing.expectEqual(2, links("# FROM|TO\na|b\nc|d\n"));
+    try testing.expectEqual(2, links("# FROM|TO\na|b\nc|d"));
+    try testing.expectEqual(1, links("\n"));
+    try testing.expectEqual(3, links("a|b\n\n #not a comment\n"));
+}
+
+fn fixedClock(_: Allocator, _: Io) Allocator.Error![]const u8 {
+    return "2026-11-01 16:45:00";
+}
+
+/// A Store in a fresh directory under `.zig-cache/tmp`; `sub` is in it, not made yet.
+fn tmpStore(arena: Allocator, tmp: testing.TmpDir, sub: []const u8) !Store {
+    const dir = try std.fs.path.join(arena, &.{ ".zig-cache", "tmp", &tmp.sub_path, sub });
+    return .{ .io = testing.io, .dir = dir, .clock = fixedClock };
+}
+
+test "Store: save makes the directory, then list, entries, read and exists see it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const aliases = try Aliases.parse(arena, "MiniFuse 1=MF\n");
+    var s = try tmpStore(arena, tmp, "profiles");
+    s.aliases = aliases;
+    try testing.expectEqual(0, (try s.list(arena)).len);
+    try testing.expect(!try s.exists(arena, "Live"));
+    try testing.expectError(error.Unreadable, s.read(arena, "Live"));
+
+    var g = try pipewire.parse(arena, @embedFile("testdata/pw-dump-streams.json"), .none);
+    try g.applyAliases(arena, aliases);
+    try s.save(arena, "Live", g);
+    try s.save(arena, "empty", .{ .endpoints = &.{}, .connections = &.{} });
+    try testing.expect(try s.exists(arena, "Live"));
+
+    const p = try s.read(arena, "Live");
+    try testing.expectEqual(5, p.lines.len);
+    try testing.expectEqualStrings("MF Main Output L/R", p.device("pw:alsa_output.usb-ARTURIA_MiniFuse_1_8830400043200514-00.HiFi__Line1__sink").?.label);
+    const file = try tmp.dir.readFileAlloc(testing.io, "profiles/Live.conf", arena, .unlimited);
+    try testing.expect(std.mem.startsWith(u8, file, "# aroute profile \"Live\", saved 2026-11-01 16:45:00\n"));
+
+    try testing.expectEqualDeep(&[_]Store.Entry{ .{ .name = "empty", .links = 0 }, .{ .name = "Live", .links = 5 } }, try s.entries(arena));
+    // Overwriting.
+    try s.save(arena, "Live", .{ .endpoints = &.{}, .connections = &.{} });
+    try testing.expectEqual(0, (try s.read(arena, "Live")).lines.len);
+}
+
+test "Store: delete, as rm -f" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const s = try tmpStore(arena, tmp, "");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "a.conf", .data = "" });
+    try s.delete(arena, "a");
+    try testing.expect(!try s.exists(arena, "a"));
+    // Already gone.
+    try s.delete(arena, "a");
+    // A directory can't be.
+    try tmp.dir.createDirPath(testing.io, "dir.conf");
+    try testing.expectError(error.Undeletable, s.delete(arena, "dir"));
+}
+
+test "Store: what can't be read or written" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A Profile that is a directory: listed, with no Links, and unreadable.
+    const s = try tmpStore(arena, tmp, "");
+    try tmp.dir.createDirPath(testing.io, "odd.conf");
+    try testing.expectEqualDeep(&[_]Store.Entry{.{ .name = "odd", .links = 0 }}, try s.entries(arena));
+    try testing.expectError(error.Unreadable, s.read(arena, "odd"));
+    try testing.expectError(error.Unwritable, s.save(arena, "odd", .{ .endpoints = &.{}, .connections = &.{} }));
+
+    // The profiles "directory" is a file: no Profiles, and none can be saved.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "" });
+    const f = try tmpStore(arena, tmp, "file");
+    try testing.expectEqual(0, (try f.list(arena)).len);
+    try testing.expectError(error.Unwritable, f.save(arena, "x", .{ .endpoints = &.{}, .connections = &.{} }));
+}
+
+fn saveListRead(gpa: Allocator, s: Store) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const g = try pipewire.parse(arena, @embedFile("testdata/pw-dump-streams.json"), .none);
+    // A fresh arena for each, so its first allocation can fail.
+    for (0..3) |step| {
+        var each: std.heap.ArenaAllocator = .init(gpa);
+        defer each.deinit();
+        const a = each.allocator();
+        switch (step) {
+            0 => try s.save(a, "Live", g),
+            1 => _ = try s.entries(a),
+            else => _ = try s.read(a, "Live"),
+        }
+    }
+}
+
+test "Store: running out of memory leaks nothing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, saveListRead, .{try tmpStore(arena_state.allocator(), tmp, "")});
 }

@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-11-02
+
+### Added
+
+- `3` Save profile in the TUI. The status line asks `Save profile as (Esc to cancel): `, starting with the current Profile's name unless it is `default`. Only the characters a name may have go in (letters, digits, space, `.`, `_`, `-`), and spaces around the name are dropped. Saving under another Profile's name asks `Profile 'NAME' exists. Overwrite? (y/n) ` first (anything starting with `y` and `Enter` is yes; otherwise `Not saved.`). `Esc` cancels either question. The status line then says `✓ Saved profile 'NAME'`, or `✗ could not write <path>`. The saved Profile becomes the current one, without `(modified)`.
+- `4` Load profile: the PROFILES list (`a Live set  (12 links)`), with the profiles directory in the header. Picking one re-reads the graph and makes it match the Profile, then says `✓ Loaded 'NAME': N added, N removed`, with `N failed` in red if any Link could not be made, and `· skipped (not present): …` for missing Devices. If audio Devices of it are missing, a screen lists them (and missing MIDI Devices), says how many of its Links would be made, and asks `y` to continue or `n`/`Esc` to abort (`Not loaded.`). The loaded Profile becomes the current one. A Profile that can't be read says `✗ cannot read profile 'NAME'`.
+- `5` Delete profile: the same list. Picking one asks `Delete profile 'NAME'? (y/n) `, then says `✓ Deleted profile 'NAME'` (or `Not deleted.`, or `✗ could not delete <path>`) and stays on the list, so several can be deleted in a row. Deleting the current Profile makes it `default` again.
+- With no Profiles, both lists say `(no saved profiles yet — use 3 Save profile)`.
+- Load and Delete page with `PgUp`/`PgDn` (`PROFILES  2/3`) and have `/` search, matching the Profile's name, as in Connect and Disconnect.
+- Profiles saved in the TUI load in the script, and the other way round.
+
+### Changed
+
+- Unlike the script, Save re-reads the graph just before saving, as Connect and Disconnect do before acting. Picking `y` on the missing-Devices screen also re-reads it and plans the load again.
+- Unlike the script, there is no limit of 52 Profiles that can be listed. The missing-Devices screen scrolls with `PgUp`/`PgDn` when it doesn't fit, and a long profiles directory in the header is cut with `…` instead of wrapping.
+- After answering a Delete question, the search is cleared, so the status line shows what happened.
+
 ## [0.0.9] - 2026-11-01
 
 ### Added

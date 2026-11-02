@@ -121,10 +121,16 @@ pub fn apply(arena: Allocator, g: graph.Graph, p: Plan, wiring: anytype) !Result
     return result;
 }
 
+/// What goes around `N failed`, e.g. to show it in red; nothing by default.
+pub const Highlight = struct {
+    on: []const u8 = "",
+    off: []const u8 = "",
+};
+
 /// `✓ Loaded 'NAME': N added, N removed[, N failed][ · skipped (not present): …]`
-pub fn summary(w: *Writer, name: []const u8, p: Plan, r: Result) Writer.Error!void {
+pub fn summary(w: *Writer, name: []const u8, p: Plan, r: Result, failed: Highlight) Writer.Error!void {
     try w.print("✓ Loaded '{s}': {d} added, {d} removed", .{ name, r.added, r.removed });
-    if (r.failed > 0) try w.print(", {d} failed", .{r.failed});
+    if (r.failed > 0) try w.print(", {s}{d} failed{s}", .{ failed.on, r.failed, failed.off });
     var sep: []const u8 = " · skipped (not present): ";
     for ([_][]const []const u8{ p.missing_audio, p.missing_midi }) |missing| for (missing) |m| {
         try w.print("{s}{s}", .{ sep, m });
@@ -188,7 +194,7 @@ const FakeWiring = struct {
 
 fn summaryOf(arena: Allocator, p: Plan, r: Result) ![]const u8 {
     var out: Writer.Allocating = .init(arena);
-    try summary(&out.writer, "Test", p, r);
+    try summary(&out.writer, "Test", p, r, .{});
     return out.written();
 }
 
@@ -392,4 +398,12 @@ test "summary: missing MIDI after missing audio" {
         "✓ Loaded 'Test': 2 added, 0 removed · skipped (not present): A, M1, M2",
         try summaryOf(arena_state.allocator(), p, .{ .added = 2 }),
     );
+}
+
+test "summary: the failures highlighted" {
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const p: Plan = .{ .wanted = &.{}, .missing_audio = &.{}, .missing_midi = &.{} };
+    try summary(&out.writer, "Test", p, .{ .failed = 1 }, .{ .on = "<", .off = ">" });
+    try testing.expectEqualStrings("✓ Loaded 'Test': 0 added, 0 removed, <1 failed>", out.written());
 }

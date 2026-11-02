@@ -4,7 +4,7 @@ A two-column patchbay TUI for PipeWire audio and ALSA/PipeWire MIDI, written in 
 
 ## Pull requests
 
-Before opening a PR, run `zig build coverage` (kcov; totals in `coverage/merged/kcov-merged/cobertura.xml`) on the branch and on `main` (e.g. in a `git worktree`). In the PR's Evidence, report line coverage `main` → branch, overall and for each changed file, and every uncovered line with why. Zig only compiles what some test reaches, so code no test calls is missing from the report rather than uncovered: a new or changed function absent from it is untested.
+Before opening a PR, run `zig build coverage` (kcov; totals in `coverage/merged/kcov-merged/cobertura.xml`) on the issue branch only; don't run it on `main`. In the PR's Evidence, report the branch's line coverage, overall and for each changed file, and every uncovered line with why. Zig only compiles what some test reaches, so code no test calls is missing from the report rather than uncovered: a new or changed function absent from it is untested.
 
 ## Agent skills
 

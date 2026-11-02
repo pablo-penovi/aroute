@@ -29,8 +29,13 @@ pub fn main(init: std.process.Init) !void {
     if (missing.len > 0) dieMissing(io, missing);
     const config_dir = try configDir(arena, init.environ_map.*);
 
-    const profiles_dir = try std.fs.path.join(arena, &.{ config_dir, "profiles" });
     const aliases = try readAliases(arena, io, config_dir);
+    const store: profile.Store = .{
+        .io = io,
+        .dir = try std.fs.path.join(arena, &.{ config_dir, "profiles" }),
+        .aliases = aliases,
+        .clock = savedAt,
+    };
     const show_all = showAll(init.environ_map.*);
 
     var buf: [4096]u8 = undefined;
@@ -41,13 +46,17 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "--list")) {
         try cli.list(out, arena, try scan(arena, io, aliases, show_all));
     } else if (std.mem.eql(u8, command, "--profiles")) {
-        for (try profileNames(arena, io, profiles_dir)) |name| try out.print("{s}\n", .{name});
+        for (try store.list(arena)) |name| try out.print("{s}\n", .{name});
     } else if (std.mem.eql(u8, command, "--save")) {
         const name: []const u8 = if (args.len > 2) args[2] else "";
         if (name.len == 0) die(io, "usage: aroute --save NAME", .{});
         if (!profile.validName(name)) die(io, profile.invalid_name, .{});
         const g = try scan(arena, io, aliases, show_all);
-        const path = try save(arena, io, profiles_dir, name, g, aliases);
+        const path = try store.path(arena, name);
+        store.save(arena, name, g) catch |err| switch (err) {
+            error.Unwritable => die(io, "could not write {s}", .{path}),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
         try out.print("Saved {s}\n", .{path});
     } else if (std.mem.eql(u8, command, "--load")) {
         const name: []const u8 = if (args.len > 2) args[2] else "";
@@ -55,17 +64,21 @@ pub fn main(init: std.process.Init) !void {
         const flag: []const u8 = if (args.len > 3) args[3] else "";
         if (flag.len > 0 and !std.mem.eql(u8, flag, "--force")) die(io, "unknown option '{s}' (try --help)", .{flag});
         const g = try scan(arena, io, aliases, show_all);
-        const p = try load.plan(arena, g, try readProfile(arena, io, profiles_dir, name));
+        const saved = store.read(arena, name) catch |err| switch (err) {
+            error.Unreadable => die(io, "no profile named '{s}'", .{name}),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const p = try load.plan(arena, g, saved);
         if (p.missing_audio.len > 0) try confirmMissing(io, name, p.missing_audio, flag.len > 0);
         const result = try load.apply(arena, g, p, Wiring{ .arena = arena, .io = io });
-        try load.summary(out, name, p, result);
+        try load.summary(out, name, p, result, .{});
         try out.writeByte('\n');
     } else if (command.len == 0) {
         if (!try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) {
             die(io, "the TUI needs a terminal (see --help for non-interactive use)", .{});
         }
         const scanner: Scanner = .{ .io = io, .aliases = aliases, .show_all = show_all };
-        tui.run(init.gpa, io, scanner, TuiWiring{ .io = io }) catch |err| switch (err) {
+        tui.run(init.gpa, io, scanner, TuiWiring{ .io = io }, store) catch |err| switch (err) {
             error.Unreadable => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
             else => |e| return e,
         };
@@ -73,27 +86,6 @@ pub fn main(init: std.process.Init) !void {
         die(io, "unknown option '{s}' (try --help)", .{command});
     }
     try out.flush();
-}
-
-/// Writes every current Link as the Profile `name`, overwriting it, and
-/// returns its path.
-fn save(arena: Allocator, io: Io, profiles_dir: []const u8, name: []const u8, g: graph.Graph, aliases: Aliases) ![]const u8 {
-    var file: Io.Writer.Allocating = .init(arena);
-    try profile.write(&file.writer, arena, name, try savedAt(arena, io), g, aliases);
-    const path = try std.fmt.allocPrint(arena, "{s}/{s}.conf", .{ profiles_dir, name });
-    Io.Dir.cwd().createDirPath(io, profiles_dir) catch die(io, "could not write {s}", .{path});
-    Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = file.written() }) catch die(io, "could not write {s}", .{path});
-    return path;
-}
-
-/// Slices of the file are kept in the result.
-fn readProfile(arena: Allocator, io: Io, profiles_dir: []const u8, name: []const u8) Allocator.Error!profile.Profile {
-    const path = try std.fmt.allocPrint(arena, "{s}/{s}.conf", .{ profiles_dir, name });
-    const source = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 24)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => die(io, "no profile named '{s}'", .{name}),
-    };
-    return profile.parse(arena, source);
 }
 
 /// Lists the missing audio Devices on stderr. Unless `force`, asks whether to
@@ -183,16 +175,6 @@ fn savedAt(arena: Allocator, io: Io) Allocator.Error![]const u8 {
         else => return "",
     };
     return std.mem.trimEnd(u8, now, "\n");
-}
-
-/// No profiles directory, or an unreadable one, means no Profiles.
-fn profileNames(arena: Allocator, io: Io, profiles_dir: []const u8) Allocator.Error![]const []const u8 {
-    var dir = Io.Dir.cwd().openDir(io, profiles_dir, .{ .iterate = true }) catch return &.{};
-    defer dir.close(io);
-    return profile.names(arena, io, dir) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => &.{},
-    };
 }
 
 /// Reads the graph, with aliases applied to every Endpoint label.
