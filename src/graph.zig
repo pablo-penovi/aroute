@@ -106,6 +106,9 @@ pub const NamedPort = struct {
     pw: ?u32,
     /// ALSA Ports only.
     alsa: ?Addr = null,
+    /// A PipeWire audio Port's channel position (`FL`, `MONO`, `AUX0`, …),
+    /// for pairing channels; empty if it has none.
+    channel: []const u8 = "",
 };
 
 pub const Graph = struct {
@@ -137,6 +140,18 @@ pub const Graph = struct {
             if ((p.alsa == null or p.direction == direction) and std.mem.eql(u8, p.name, name)) found = p;
         }
         return found;
+    }
+
+    /// The channel position of the PipeWire Port `id`; empty if it has none.
+    pub fn channel(g: Graph, id: u32) []const u8 {
+        for (g.ports) |p| if (p.alsa == null and p.pw == id) return p.channel;
+        return "";
+    }
+
+    /// The Connection between two Endpoints, if there is one.
+    pub fn connection(g: Graph, from: usize, to: usize) ?Connection {
+        for (g.connections) |c| if (c.from == from and c.to == to) return c;
+        return null;
     }
 
     /// Whether a Device is in the graph, by its id in profiles:

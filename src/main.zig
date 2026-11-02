@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
             die(io, "the TUI needs a terminal (see --help for non-interactive use)", .{});
         }
         const scanner: Scanner = .{ .io = io, .aliases = aliases, .show_all = show_all };
-        tui.run(init.gpa, io, scanner) catch |err| switch (err) {
+        tui.run(init.gpa, io, scanner, TuiWiring{ .io = io }) catch |err| switch (err) {
             error.Unreadable => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
             else => |e| return e,
         };
@@ -124,7 +124,7 @@ const Wiring = struct {
     io: Io,
 
     pub fn connect(w: Wiring, ends: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
-        tools.connect(w.arena, w.io, ends) catch |err| return w.fail(err, ends);
+        tools.connect(w.arena, w.io, ends, null) catch |err| return w.fail(err, ends);
     }
 
     pub fn disconnect(w: Wiring, ends: graph.Ends) error{ ToolFailed, OutOfMemory }!void {
@@ -140,6 +140,25 @@ const Wiring = struct {
             error.ToolFailed => error.ToolFailed,
             error.OutOfMemory => error.OutOfMemory,
         };
+    }
+};
+
+/// Changes the graph for the TUI.
+const TuiWiring = struct {
+    io: Io,
+
+    /// Makes a Link; null if it was made, else what the tool said.
+    pub fn connect(w: TuiWiring, arena: Allocator, ends: graph.Ends) Allocator.Error!?[]const u8 {
+        var why: []const u8 = "";
+        tools.connect(arena, w.io, ends, &why) catch |err| switch (err) {
+            error.MissingTool => die(w.io, "missing dependency: {s}", .{switch (ends) {
+                .pw => "pw-link",
+                .alsa => "aconnect",
+            }}),
+            error.ToolFailed => return why,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return null;
     }
 };
 

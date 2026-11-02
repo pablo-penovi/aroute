@@ -33,6 +33,8 @@ const Port = struct {
     monitor: bool,
     /// The ALSA Port it stands for, on a Midi-Bridge port.
     bridge: ?Bridged = null,
+    /// Its channel position; see `channel`.
+    channel: []const u8 = "",
 };
 
 const Bridged = struct {
@@ -261,6 +263,7 @@ pub fn parse(arena: Allocator, dump: []const u8, scan: alsa.Scan) ParseError!gra
             .direction = port.direction,
             .kind = port.kind,
             .pw = port.id,
+            .channel = port.channel,
         });
     }
 
@@ -329,12 +332,23 @@ fn readPort(id: i64, info: json.ObjectMap) Allocator.Error!?Port {
         .bridge = bridged(string(props.get("object.path")) orelse ""),
         .index = integer(props.get("port.id")) orelse 0,
         .name = string(props.get("port.name")) orelse "",
+        .channel = channel(string(props.get("audio.channel")) orelse "", string(props.get("port.name")) orelse ""),
         .monitor = if (monitor) |m| switch (m) {
             .bool => |b| b,
             .string => |s| std.mem.eql(u8, s, "true"),
             else => false,
         } else false,
     };
+}
+
+/// A port's channel position, as the script's `chan`: its `audio.channel`,
+/// else `FL` or `FR` for a name ending in `left`/`_l` or `right`/`_r` (any
+/// case), else none.
+fn channel(position: []const u8, name: []const u8) []const u8 {
+    if (position.len > 0) return position;
+    for ([_][]const u8{ "left", "_l" }) |end| if (std.ascii.endsWithIgnoreCase(name, end)) return "FL";
+    for ([_][]const u8{ "right", "_r" }) |end| if (std.ascii.endsWithIgnoreCase(name, end)) return "FR";
+    return "";
 }
 
 /// A Midi-Bridge port's `object.path`, `alsa:seq:<card>:client_<N>:capture_<M>`
@@ -438,6 +452,39 @@ test "stem drops the channel suffix" {
         .{ "midi_out", "midi_out" },
     };
     for (cases) |c| try testing.expectEqualStrings(c[1], stem(c[0]));
+}
+
+test "channel positions: audio.channel, else left/right from the port name" {
+    const cases = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ "FL", "capture_FL", "FL" },
+        .{ "AUX3", "playback_AUX3", "AUX3" },
+        .{ "MONO", "whatever_right", "MONO" },
+        .{ "", "output_01_left", "FL" },
+        .{ "", "Out_L", "FL" },
+        .{ "", "send RIGHT", "FR" },
+        .{ "", "out_r", "FR" },
+        .{ "", "out_1", "" },
+        .{ "", "midi_out", "" },
+        .{ "", "", "" },
+    };
+    for (cases) |c| try testing.expectEqualStrings(c[2], channel(c[0], c[1]));
+}
+
+test "a port's channel position is kept, for pairing channels" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const dump = comptime "[" ++
+        testNode(10, "\"node.name\":\"synth\",\"node.description\":\"Synth\",\"media.class\":\"Audio/Source\"") ++
+        testPortProps(101, 10, "output", 0, "out_a", "\"format.dsp\":\"32 bit float mono audio\",\"audio.channel\":\"FR\"") ++
+        testPort(102, 10, "output", 1, "out_left") ++
+        testPort(103, 10, "output", 2, "out_3") ++
+        \\{"id":1,"type":"PipeWire:Interface:Client","info":{"props":{}}}]
+    ;
+    const g = try parse(arena_state.allocator(), dump, .none);
+    try testing.expectEqualStrings("FR", g.channel(101));
+    try testing.expectEqualStrings("FL", g.channel(102));
+    try testing.expectEqualStrings("", g.channel(103));
+    try testing.expectEqualStrings("", g.channel(999));
 }
 
 /// A hand-written dump: `id`s are what the tests refer to.

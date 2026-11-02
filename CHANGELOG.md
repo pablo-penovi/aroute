@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-11-01
+
+### Added
+
+- `1` Connect in the TUI. Step 1 picks a device, step 2 the other end; the status line then says `✓ Source → Destination`, or `✗ Source → Destination: <what pw-link or aconnect said>`. Audio channels are paired as in the script: a mono Port fans out, matching channel positions pair up, otherwise they pair in order. MIDI between two ALSA Ports uses `aconnect`, otherwise `pw-link`, through the Midi-Bridge for ALSA MIDI.
+- Only the focused column has letters, always `a`… from the top (`a`–`z`, `A`–`Z`) and only on rows on screen; the other column is dimmed. Focus starts on FROM, and `Tab` switches to TO, so you can start from a Destination. In step 2 focus moves to the other column, which lists only what the first pick can be connected to (same Kind, not connected yet, ALSA to PipeWire only through a Midi-Bridge port); the first pick is shown in reverse video.
+- When a column doesn't fit, `PgUp`/`PgDn` page through it and the letters go to the new rows. A page is as many rows as fit, at most 52; the header shows `FROM  2/3` and the menu `PgUp/PgDn Page`.
+- While picking, the CONNECTIONS list is a one-line summary (`7 connections`) and the graph is not re-read. Just before connecting it is, and if a pick is no longer there the status says `✗ … is gone` instead.
+
+### Changed
+
+- Unlike the script, rows that can't be picked are left out of the focused column instead of shown without a letter, there is no limit of 52 pickable rows, and `Esc` in step 2 goes back to step 1 (a second `Esc` goes home) instead of straight home.
+
 ## [0.0.6] - 2026-11-01
 
 ### Added
