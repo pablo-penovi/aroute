@@ -4,6 +4,7 @@ const Io = std.Io;
 const cli = @import("cli.zig");
 const graph = @import("graph.zig");
 const pipewire = @import("pipewire.zig");
+const monitor = @import("monitor.zig");
 const alsa = @import("alsa.zig");
 const seq = @import("seq.zig");
 const tools = @import("tools.zig");
@@ -17,6 +18,7 @@ const Aliases = @import("aliases.zig").Aliases;
 pub const panic = std.debug.FullPanic(struct {
     fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         term.restore();
+        tools.killMonitor();
         std.debug.defaultPanic(msg, first_trace_addr);
     }
 }.panic);
@@ -84,7 +86,10 @@ pub fn main(init: std.process.Init) !void {
         if (!try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) {
             die(io, "the TUI needs a terminal (see --help for non-interactive use)", .{});
         }
-        tui.run(init.gpa, io, Scanner{ .source = source }, TuiWiring{ .io = io, .seq = sequencer }, store) catch |err| switch (err) {
+        var live: Live = .{ .source = source, .fold = .init(init.gpa) };
+        defer live.deinit();
+        term.on_interrupt = tools.killMonitor;
+        tui.run(init.gpa, io, Scanner{ .live = &live }, TuiWiring{ .io = io, .seq = sequencer }, store) catch |err| switch (err) {
             error.Unreadable => die(io, "cannot read the PipeWire graph (is PipeWire running?)", .{}),
             else => |e| return e,
         };
@@ -224,23 +229,114 @@ const Source = struct {
             error.ToolFailed => return error.Unreadable,
             error.OutOfMemory => return error.OutOfMemory,
         };
-        const listing: seq.Listing = if (s.seq) |open| try open.list(arena) else .none;
-        const midi = try alsa.parse(arena, listing, s.show_all);
-        var g = pipewire.parse(arena, dump, midi) catch |err| switch (err) {
+        var g = pipewire.parse(arena, dump, try s.midi(arena)) catch |err| switch (err) {
             error.InvalidDump => return error.Unreadable,
             else => |e| return e,
         };
         try g.applyAliases(arena, s.aliases);
         return g;
     }
+
+    /// The ALSA MIDI Endpoints and Links, read from the sequencer now.
+    fn midi(s: Source, arena: Allocator) Allocator.Error!alsa.Scan {
+        const listing: seq.Listing = if (s.seq) |open| try open.list(arena) else .none;
+        return alsa.parse(arena, listing, s.show_all);
+    }
 };
 
-/// Reads the graph for the TUI, every second.
-const Scanner = struct {
+/// The PipeWire graph as `pw-dump --monitor` streams it, kept running for
+/// the TUI (ADR 0003). If it exits, the graph can't be read until it is
+/// started again, at most once a second.
+const Live = struct {
     source: Source,
+    fold: monitor.Fold,
+    process: ?tools.Monitor = null,
+    /// When it was last started, on the awake clock, in milliseconds.
+    started: ?i64 = null,
+
+    fn deinit(l: *Live) void {
+        l.stop();
+        l.fold.deinit();
+    }
+
+    fn stop(l: *Live) void {
+        if (l.process) |*p| p.stop(l.source.io);
+        l.process = null;
+        l.fold.reset();
+    }
+
+    /// Takes in everything it has written. If it has exited, or wrote
+    /// something that isn't a dump, it is stopped.
+    fn drain(l: *Live) Allocator.Error!void {
+        const p = l.process orelse return;
+        var buf: [64 * 1024]u8 = undefined;
+        while (true) switch (p.read(&buf)) {
+            .bytes => |n| _ = l.fold.feed(buf[0..n]) catch |err| switch (err) {
+                error.InvalidDump => return l.stop(),
+                error.OutOfMemory => return error.OutOfMemory,
+            },
+            .none => return,
+            .exited => return l.stop(),
+        };
+    }
+
+    /// Running, with at least the whole graph read; started if need be, and
+    /// waited for.
+    fn ready(l: *Live) tui.ScanError!void {
+        try l.drain();
+        if (l.process == null) {
+            const now = awake(l.source.io);
+            if (l.started) |t| if (now - t < 1000) return error.Unreadable;
+            l.started = now;
+            l.process = tools.Monitor.start(l.source.io) catch |err| switch (err) {
+                error.MissingTool => die(l.source.io, "missing dependency: pw-dump", .{}),
+                error.ToolFailed => return error.Unreadable,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+        }
+        while (!l.fold.ready) {
+            l.process.?.wait(-1);
+            try l.drain();
+            if (l.process == null) return error.Unreadable;
+        }
+    }
+};
+
+fn awake(io: Io) i64 {
+    return Io.Clock.awake.now(io).toMilliseconds();
+}
+
+/// Reads the graph for the TUI: PipeWire as `Live` has it, ALSA from the
+/// sequencer.
+const Scanner = struct {
+    live: *Live,
 
     pub fn scan(s: Scanner, arena: Allocator) tui.ScanError!graph.Graph {
-        return s.source.read(arena);
+        const l = s.live;
+        try l.ready();
+        var g = try pipewire.build(arena, try l.fold.values(arena), try l.source.midi(arena));
+        try g.applyAliases(arena, l.source.aliases);
+        return g;
+    }
+
+    pub fn drain(s: Scanner) Allocator.Error!void {
+        return s.live.drain();
+    }
+
+    /// Waits until the monitor shows the PipeWire Links made and not those
+    /// undone, at most a second: it hears of them a few milliseconds after
+    /// `pw-link` returns.
+    pub fn settle(s: Scanner, made: []const graph.Ends, undone: []const graph.Ends) Allocator.Error!void {
+        const l = s.live;
+        const deadline = awake(l.source.io) + 1000;
+        while (true) {
+            try l.drain();
+            const p = l.process orelse return;
+            if (l.fold.settled(made, undone)) return;
+            const left = deadline - awake(l.source.io);
+            if (left <= 0) return;
+            p.wait(@intCast(left));
+        }
     }
 };
 
@@ -276,9 +372,10 @@ fn dieMissing(io: Io, missing: []const tools.Tool) noreturn {
     std.process.exit(1);
 }
 
-/// Puts the terminal back first if the TUI is up.
+/// Puts the terminal back first if the TUI is up, and stops the monitor.
 fn die(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
     term.restore();
+    tools.killMonitor();
     var buf: [1024]u8 = undefined;
     var stderr = Io.File.stderr().writer(io, &buf);
     stderr.interface.print("aroute: " ++ fmt ++ "\n", args) catch {};

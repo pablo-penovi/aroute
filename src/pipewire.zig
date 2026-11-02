@@ -102,7 +102,7 @@ const PendingConnection = struct {
     links: std.ArrayList(graph.Link) = .empty,
 };
 
-/// Everything returned is allocated in `arena`, and may point into `dump` and `scan`.
+/// The graph in a one-shot `pw-dump`, as `build`.
 pub fn parse(arena: Allocator, dump: []const u8, scan: alsa.Scan) ParseError!graph.Graph {
     // pw-dump repeats keys in some params (e.g. a stream's `Tag` has `info` twice).
     const options: json.ParseOptions = .{ .duplicate_field_behavior = .use_last };
@@ -111,12 +111,18 @@ pub fn parse(arena: Allocator, dump: []const u8, scan: alsa.Scan) ParseError!gra
         else => return error.InvalidDump,
     };
     if (root != .array) return error.InvalidDump;
+    return build(arena, root.array.items, scan);
+}
 
+/// The graph made of `objects`, the elements of a `pw-dump` in its order.
+/// Everything returned is allocated in `arena`, and may point into `scan`
+/// but not into `objects`, which can go once it returns.
+pub fn build(arena: Allocator, objects: []const json.Value, scan: alsa.Scan) Allocator.Error!graph.Graph {
     var nodes: std.AutoHashMapUnmanaged(i64, Node) = .empty;
     var ports: std.ArrayList(Port) = .empty;
     var links: std.ArrayList([2]u32) = .empty;
 
-    for (root.array.items) |item| {
+    for (objects) |item| {
         if (item != .object) continue;
         const obj = item.object;
         const id = integer(obj.get("id")) orelse continue;
@@ -124,9 +130,9 @@ pub fn parse(arena: Allocator, dump: []const u8, scan: alsa.Scan) ParseError!gra
         const type_name = string(obj.get("type")) orelse continue;
 
         if (std.mem.eql(u8, type_name, "PipeWire:Interface:Node")) {
-            try nodes.put(arena, id, readNode(object(info.get("props"))));
+            try nodes.put(arena, id, try readNode(arena, object(info.get("props"))));
         } else if (std.mem.eql(u8, type_name, "PipeWire:Interface:Port")) {
-            if (try readPort(id, info)) |port| try ports.append(arena, port);
+            if (try readPort(arena, id, info)) |port| try ports.append(arena, port);
         } else if (std.mem.eql(u8, type_name, "PipeWire:Interface:Link")) {
             const out = portId(integer(info.get("output-port-id"))) orelse continue;
             const in = portId(integer(info.get("input-port-id"))) orelse continue;
@@ -299,7 +305,8 @@ fn isChannelSuffix(s: []const u8) bool {
     return true;
 }
 
-fn readNode(props: ?json.ObjectMap) Node {
+/// Its name and label are copied into `arena`, as the Graph keeps them.
+fn readNode(arena: Allocator, props: ?json.ObjectMap) Allocator.Error!Node {
     const p = props orelse return .{};
     const class = string(p.get("media.class")) orelse "";
     const label = if (std.mem.startsWith(u8, class, "Stream/"))
@@ -307,13 +314,15 @@ fn readNode(props: ?json.ObjectMap) Node {
     else
         first(p, &.{ "node.description", "node.nick", "application.name", "node.name" });
     return .{
-        .name = string(p.get("node.name")) orelse "",
-        .label = label orelse "?",
+        .name = try arena.dupe(u8, string(p.get("node.name")) orelse ""),
+        .label = try arena.dupe(u8, label orelse "?"),
         .class = class,
     };
 }
 
-fn readPort(id: i64, info: json.ObjectMap) Allocator.Error!?Port {
+/// Its channel is copied into `arena`, as the Graph keeps it; its name
+/// only goes into the Graph through what is printed from it.
+fn readPort(arena: Allocator, id: i64, info: json.ObjectMap) Allocator.Error!?Port {
     const props = object(info.get("props")) orelse return null;
     const format = string(props.get("format.dsp")) orelse return null;
     const kind: Kind = if (std.mem.find(u8, format, "audio") != null)
@@ -332,7 +341,7 @@ fn readPort(id: i64, info: json.ObjectMap) Allocator.Error!?Port {
         .bridge = bridged(string(props.get("object.path")) orelse ""),
         .index = integer(props.get("port.id")) orelse 0,
         .name = string(props.get("port.name")) orelse "",
-        .channel = channel(string(props.get("audio.channel")) orelse "", string(props.get("port.name")) orelse ""),
+        .channel = try arena.dupe(u8, channel(string(props.get("audio.channel")) orelse "", string(props.get("port.name")) orelse "")),
         .monitor = if (monitor) |m| switch (m) {
             .bool => |b| b,
             .string => |s| std.mem.eql(u8, s, "true"),
